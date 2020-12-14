@@ -1,8 +1,7 @@
-# bigleaf_maple_SNPs
-R Scripts and data from bigleaf maple range-wide SNP genetic marker survey
-
-Range-wide assessment of a SNP panel for individualization and geolocalization of bigleaf maple 
+# Range-wide assessment of a SNP panel for individualization and geolocalization of bigleaf maple 
 ===============================================================================================
+
+R Scripts and data from bigleaf maple range-wide SNP genetic marker survey
 Rich Cronn and Kristen Finch - December 2020
 
 
