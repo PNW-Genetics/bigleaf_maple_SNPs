@@ -1,0 +1,274 @@
+---
+title: "Supplementary Data Analysis - Random Forest Classification"
+author: "Kristen N. Finch"
+date: "12/1/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+### About
+
+This document was prepared by Kristen N. Finch to supplement the article. The reader will find R code necessary to replicate our random forest classification for bigleaf maple Level III Ecoregions using DNA genotypes with the files provided.
+
+This dataset is available as supplement for a research article that was submitted in Decemebr 2020 to *Forensic Science International* special edition "Animals and Environments." 
+
+Suggested citation for the Article: 
+Cronn RC, Finch KN, Hauck LL, Parker-Forney M, Milligan B, Dowling J, and Adventure Scientists (2020). for Range-wide assessment of a SNP panel for individualization and geolocalization of bigleaf maple (*Acer macrophyllum* Pursh). Forensic Sci Int. Submitted.
+
+This document and analysis was prepared by Kristen N. Finch. Questions about this document should be directed to Kristen N. Finch using the contact email provided under this ORCID ID: https://orcid.org/0000-0003-2098-7546 This document is not intended as a tutorial. This document is intended for intermediate and advanced users. 
+
+All users should frequently examine generated data frames with head(). The View() function can also be used, but viewing large datasets can cause R to crash. 
+
+### Set Up
+
+This document was originally prepared with R version 3.6.1
+(2019-07-05) -- "Action of the Toes" and R Studio version 1.2.1578. Analyses may not work as described with different versions of R and packages. *Also note that any changes to directory names or filenames will require changes to the code below.* I recommend using the filenames and directory names I have chosen to limit confusion.
+
+To use the files provided, set your working directory to directory downloaded from *Forensic Science International* with setwd(PATH).
+
+```{r,message=FALSE,warning=FALSE}
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+# ~/Cronn_etal_2020_supplement
+# it will be necessary to change the path to the files. 
+```
+
+### Libaries
+
+Dependencies may need to be installed manually. R will prompt. 
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(randomForest)
+library(reshape2)
+library(stringi)
+library(stringr)
+library(tidyr)
+```
+
+### Functions
+This document contains functions that were developed to summarize data. 
+
+####get_mode()
+Used in the get_results finction below. Calculates mode for a column of data | Column of data frame.
+
+
+```{r}
+getmode<-function(column_of_data) {
+  uniqv <- unique(column_of_data)
+  uniqv[which.max(tabulate(match(column_of_data, uniqv)))]
+}
+```
+
+#### get_results()
+
+Calculates mean, median, mode, min, max, and 95% confidence interval for a column of data | Note on data & column of data frame.
+
+Example Usage:
+
+err_obs_result<-get_results("observed classification error",rf_results$err_obs)
+
+Note_about_stat must follow character syntax with double quotes: "Note about stat"
+
+```{r}
+get_results<-function(note_about_stat,column_of_data){
+  mean<-mean(column_of_data,na.rm = TRUE)
+  median<-median(column_of_data,na.rm = TRUE)
+  mode<-getmode(column_of_data)
+  min<-min(column_of_data,na.rm = TRUE)
+  max<-max(column_of_data,na.rm = TRUE)
+  err<-qt(0.975,df=length(column_of_data)-1)*sd(column_of_data,na.rm = TRUE)/sqrt(length(column_of_data))
+  up<-mean+err
+  lo<-mean-err
+  note_about_stat<-note_about_stat
+  results<-cbind.data.frame(note_about_stat,mean,median,mode,min,max,err,up,lo)
+  return(results)
+}
+```
+
+### Data
+
+Here we use the adegenet filtered data to remove individuals with greater than 10% missing data. 
+
+```{r,message=FALSE,warning=FALSE,comment=""}
+maple<-read.csv("~/Cronn_etal_2020_supplement/R_analysis/random_forest/MapleSNP_adegenet_1191i133s_filtered_1col.csv",header=1)
+pop_tab<-data.frame(t(table(maple$pop))) #table establishes the minimum class size to maintain balanced class sizes for random forest analysis. 
+maple<-maple[c(-1)] #sample ID's not needed for random forest classificiation.
+```
+
+
+### Regional Classification 
+
+Run Random Forest Classification with Level 3 EcoRegions. *This analysis take 1.5 hours to complete.* 
+
+Random forest require complete data. Before employing this analysis, I examined the effect of imputation method. 
+
+Methods compared: 
+1. imputation via randomForest parameter "na.action=na.roughfix" 
+2. imputation method employed by R package synbreed (deprecated)
+
+Comparison: 
+Random forest classification 15 times with each imputation method. 
+
+Conclusion: 
+I found no difference in mean error comparing methods. I selected the random forest imputation method because it is the simpler method (less code), and is part of a package that is maintained. 
+
+We estimated the range of classification errors for geographic localization by calculating the mean of the median error (%) across 5,000 random forests (2,500,000 total trees). The random expected error of a classification analysis is the reciprocal of the number of classes in the grouping variable; for example, classification analysis with 12 ecoregions should give a random classification error of (1 – (1/12)=) ~91.7%. For our analysis, we empirically estimated baseline error by randomizing the level 3 ecoregions, and comparing observed classification error to that from randomizations. 
+
+```{r,eval=FALSE}
+
+#oberved----
+fit.list<-list()
+
+#this will take about 1.5 hours to complete
+for (i in 1:length(c(1:5000))){
+  #set up loop
+  cat("Random Forest Repetition number ") 
+  cat(i)
+  cat("\n")
+  #set up training set such that class sizes are balanced and sample size is the number of samples in the smallest group.
+  training_set<-maple%>%group_by(pop)%>%sample_n(min(pop_tab$Freq),replace=FALSE)
+  fit.list[[i]]<-(fit.forest<-randomForest(pop~.,data=training_set,importance=TRUE,ntree=500, mtry=ncol(training_set)-1,na.action=na.roughfix))
+}
+
+#extract median error rates from the analysis
+fit.median<-list()
+for (i in 1:length(fit.list)){
+  fit.median[[i]] <- median(fit.list[[i]]$err.rate[,'OOB'])
+}
+
+#extract class error rates from the analysis
+class.errs<-list()
+for (i in 1:length(fit.list)){
+  class.errs[[i]] <- fit.list[[i]]$confusion[,'class.error']
+}
+
+#extract importance estimations from the analysis
+gini.list<-list()
+for (i in 1:length(fit.list)){
+  gini.list[[i]] <- fit.list[[i]]$importance
+}
+
+#save results
+err.obs<-data.frame(unlist(fit.median))
+names(err.obs)[1]<-"error"
+err.class<-melt(do.call("rbind",class.errs))
+names(err.class)<-c("iter","pop","error")
+ginis<-do.call("rbind",gini.list)
+
+#OPTIONAL
+#write results out to file 
+#write.csv(err.obs,"yourfile_rf_res_obs.csv",quote=FALSE,row.names = FALSE)
+#write.csv(err.class,"yourfile_rf_class_err.csv",quote=FALSE,row.names=FALSE)
+#write.csv(ginis,"yourfile_rf_ginis.csv",quote=FALSE,row.names=TRUE)
+
+#randomized----
+
+#perform the same with randomized eco-regions (here "pop") to obtain an estimate for the baseline error rate.
+rand.list<-list()
+
+#this will take about 2 hours to complete
+for (i in 1:length(c(1:5000))){
+  #set up loop
+  cat("Random Forest Repetition number ") 
+  cat(i)
+  cat("\n")
+  #set up training set such that class sizes are balanced and sample size is the
+  #number of samples in the smallest group.
+  training_set<-maple%>%group_by(pop)%>%sample_n(min(pop_tab$Freq),replace=FALSE)
+  rand.col<-data.frame(training_set$pop)
+  training_set$pop<-NULL
+  rand.col<-data.frame(sample_n(rand.col,nrow(rand.col),replace = FALSE))
+  training_set<-cbind.data.frame(rand.col,training_set)
+  names(training_set)[1]<-"pop"
+  rand.list[[i]]<-(fit.forest<-randomForest(pop~.,data=training_set,importance=TRUE,ntree=500,
+                                            mtry=ncol(training_set)-1,na.action=na.roughfix))
+}
+
+rand.median<-list()
+for (i in 1:length(rand.list)){
+  rand.median[[i]] <- median(rand.list[[i]]$err.rate[,'OOB'])
+}
+
+err.rand<-data.frame(unlist(rand.median))
+names(err.rand)[1]<-"error"
+
+#OPTIONAL
+#write results out to file names of your choice
+#write.csv(err.rand,"yourfile_rf_res_rand.csv",quote=FALSE,row.names=FALSE)
+
+#OPTIONAL
+#save the random forests so that you don't have to run them again to extract
+#more values for visualization of results.
+#save(fit.list, file="yourfile_ACMA_rf_obs_results.RData")
+#save(rand.list, file="yourfile_ACMA_rf_rand_results.RData")
+```
+
+### Results
+
+```{r,message=FALSE,warning=FALSE,comment=""}
+
+#load data
+err.obs<-read.csv("20200325_rf_res_obs.csv",header=1)
+err.rand<-read.csv("20200325_rf_res_rand.csv",header=1)
+err.class<-read.csv("20200325_rf_class_err.csv",header=1)
+
+#add column to differentiate results generated with observed or randomized data
+err.obs$group<-"obs"
+err.rand$group<-"rand"
+
+names(err.obs)
+names(err.rand)
+
+#convert to percent
+err.obs<-mutate(err.obs,per_err=error*100)
+err.rand<-mutate(err.rand,per_err=error*100)
+
+#combine results
+rf_results<-rbind.data.frame(err.obs,err.rand)
+
+#results table 
+(rf_results_tab<-rbind.data.frame(get_results("observed",err.obs$per_err),get_results("randomized",err.rand$per_err)))
+
+#global results for Random forest classification of ACMA trees based on genotype. 
+(res_plot<-ggplot(rf_results, aes(x=per_err, fill=group))+
+  geom_density(alpha=0.7)+ 
+  scale_fill_manual(values=c("grey80", "grey50"),labels=c("Observed Data", "Randomized Data")) +
+  theme_classic()+ theme_bw()+
+  scale_x_continuous(limits = c(0, 100))+
+  #scale_y_continuous(limits = c(0, .2))+
+  xlab("Classification Error (%)")+
+  ylab("Kernal Density Estimate")+ #I think we can call this Frequency or ~Frequency, think about it.
+  geom_vline(xintercept = mean(err.obs$per_err),color="blue")+
+  geom_vline(xintercept = mean(err.rand$per_err),color="black")+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position="bottom",
+        legend.title=element_blank(),
+        legend.background = element_blank(),
+        legend.key.size = unit(.4, "cm"),
+        legend.text = element_text(size = 8),
+        legend.key=element_rect(color="white")))
+
+#now we will look at those results by class
+err.class<-mutate(err.class,per_err=error*100)
+
+#summary statistics for classification error by eco-region included in table 1.
+(class_err_summary<-err.class[c(2,4)]%>%group_by(pop)%>%summarise_all(funs(mean,median,min,max)))
+
+#a different color palette because when I use coord_flip the colors will no longer match.
+backwards_colors<-c("#8dd3c7","#ffffb3","#bebada","#fb8072","#80b1d3","#fdb462","#b3de69","#fccde5","#d9d9d9","#bc80bd","#ccebc5","#ffed6f")
+
+#boxplots showing classification error by eco-region (supplementary figure 6)
+
+(class_err<-ggplot(aes(x=pop,y=per_err,fill=pop),color="black",data=err.class)+
+  geom_boxplot(show.legend = FALSE,alpha=.6)+
+  scale_fill_manual(values=backwards_colors)+
+  #scale_x_discrete(labels=c("South America","Central America"))+ #use this line to change Eco-Region labels
+  ylab(expression("Classification Error (%)"))+
+  xlab("Eco-Region")+
+  scale_y_continuous(limits = c(0, 100))+
+  theme_bw()+
+  theme(legend.position="none",
+        panel.grid.minor = element_blank())+coord_flip())

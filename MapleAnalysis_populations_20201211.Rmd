@@ -1,0 +1,1292 @@
+---
+title: "Supplementary Data Analysis: Range-wide assessment of SNP variation in bigleaf maple -- population samples"
+author: "Richard Cronn and Kristen N. Finch"
+date: "2020.12.01"
+output:
+    html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+    df_print: paged
+---
+
+### About
+
+This supplemental document includes R code necessary to replicate our basic genetic analyses for *Acer macrophyllum (="ACMA")*, with specific focus population variation in SNP  markers that are revealed using the Agena MassARRAY. 
+
+We adapted the Agena MassARRAY SNP assay for *ACMA*, based on the publication of [Jardine, et al. (2015), 'A Set of 204 SNP and INDEL markers for bigleaf maple'](https://link.springer.com/article/10.1007/s12686-015-0486-7). Their paper described markers for 204 loci; this analysis is based on a subset of 133 genetic markers that have high minor allele frequencies and high heterozygosity in samples from western Washington. These features -- high MAF and high heterozygosity -- make the markers suitable for individualization tests, as they combine to yield extremely low random profile match probabilities (10e^-30^ or less).  
+
+Samples for this analysis were primarily collected by [Adventure Scientist](https://www.adventurescientists.org/) volunteers in the summer of 2018. The total number of samples collected was 1284, and 951 were genotyped. An additional 244 samples were collected by the [PNW Research Station Genetics Team](https://www.fs.usda.gov/pnw/groups/genetics-and-silvicultural-foundations-management), bringing the total number of unique genotyped samples to 1195. These were genotyped in 1344 separate reactions, including replicates.
+
+The information is described in a research manuscript submitted to *Forensic Science International: Animals and Environments* special edition.
+
+Suggested citation for the Article: 
+Cronn RC, Finch KN, Hauck LL, Parker-Forney M, Milligan B, Dowling J, and Adventure Scientists (in review). Range-wide assessment of a SNP panel for individualization and geolocalization of bigleaf maple (*Acer macrophyllum* Pursh). Forensic Sci Int. 
+
+This document and analysis was prepared by Richard Cronn and Kristen N. Finch. Questions can be directed to the contact emails provided in our  ORCID ID's (Cronn, https://orcid.org/0000-0001-5342-3494; Finch, https://orcid.org/0000-0003-2098-7546). 
+
+This script does the following tasks: 
+<br>
++ Reads mass array genotypes and metadata and produces a map showing the distribution of samples.
++ Identifies and removes samples (genotypes) that exceed a 'missing data' threshold (10% in this analysis).
++ Identifies and removes SNPs (loci) that exceed a 'missing data' threshold (10% in this analysis).
++ Identifies loci that violate assumptions of Hardy-Weinburg equilibrium.
++ Calculates and plots minor allele freqencies
++ Calculates and plots expected and observed per-locus heterozygosity globally, and examines relationships between observed heterozygosity and geographic source (level 3 ecoregion).
++ Examines global and pairwise population differentiation, as Fst.
++ Removes loci known to exhibit poor assay behavior or linkage disequilibrium (LD was estimated separately using `Genepop/R`).
++ Calculates genotype probabilities for each genotype, globally and by population
++ Uses Discriminant Analysis of Principle Components (DAPC) to identify genetic 'clusters'
+*****
+
+### Set Up
+
+This document was prepared with R version 4.0.3 (2020-10-10) and RStudio version 1.3.1073; analyses may not work as described with different versions of R and packages. *Also note that changes to directory names or filenames will require changes to the code below.* As currently written, if the script and the input files are in the same directory, that directly will be set as the working directory and the script should execute.
+
+```{r echo=TRUE,message=FALSE, warning=FALSE}
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+#getwd()                                         #this will show the name of the working directory. 
+```
+
+### Libraries
+
+This analysis primarily uses the R package `adegenet`, `poppr`, `hierfstat`, and `pegas`, with additional funcitons from other packages. Dependencies may need to be installed manually; RStudio will prompt.
+
+```{r echo=TRUE, results=FALSE,message=FALSE,warning=FALSE}
+set.seed(20201201)
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+library(editData)
+library(pander)
+library(tibble)
+library(data.table)
+library(RColorBrewer)
+library(adegenet)
+library(hierfstat)
+library(pegas)
+library(poppr)
+library(ggmap)
+library(ggrepel)
+library(lattice)
+library(gridExtra)
+library(mapplots)
+library(rgdal)
+library(rgeos) 
+library(maptools)
+library(maps)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(agricolae)
+library(stringi)
+library(viridis)
+library(svglite)
+  # some packages have conflicts that interfere with functions we want to use; these are managed here
+library(conflicted)
+conflict_prefer("filter", "dplyr")
+conflict_prefer("melt", "reshape2")
+map<-maps::map
+  # set themes and colors
+theme_set(theme_bw())
+require(pals)
+cols12 <- pal.bands(cols25(12))
+```
+### Data  
+
+Data is read as *.csv, and has 1344 rows and 149 columns. We also define filename prefixes to help standardize output files at later steps.
+
+```{r echo=TRUE,message=FALSE, warning=FALSE}
+Mydata <- read.csv("MapleSNP_20201201_1344i133s_adegenet.csv", header = TRUE, sep=",")
+basefilename <- "MapleSNP_1344i133s"
+today <- Sys.Date
+dim(Mydata)										 #check dimensions
+```
+
+### Pruning
+
+This dataset includes 4 loci that generate spurious signal without added DNA; these are removed prior to analysis.
+
+```{r echo=TRUE,results=FALSE,warning=FALSE}
+Mydata <- subset(Mydata, select = -c(M1752, M3773, M4484, F5144))  #short locus names
+#Mydata <- subset(Mydata, select = -c(Maple_1752, Maple_3773, Maple_4484, AM1f_5144)) #long locus names
+tbl_df(Mydata)
+dim(Mydata)							  			 #check dimensions
+```
+
+### Sources  
+
+In this analysis, populations (= *eco3pop*) are defined as US EPA Level III [Ecoregions](https://www.epa.gov/eco-research/ecoregions), with minor modifications. In a separate step, location information (latitude, longitude) was converted into Ecoregions using ARC-GIS; our samples initially represented 14 Ecoregions.
+<br>
+  Ecoregion --- Name <br>
+  6.2.11	---  Klamath Range <br>
+  6.2.12	---  Sierra Nevada Range <br>
+  6.2.5 	---  North Cascades Range <br>
+  6.2.7 	---  Cascades Range <br>
+  6.2.8 	---  Eastern Cascades Slopes <br>
+  7.1.5 	---  Coastal Hemlock-Spruce Forests <br>
+  7.1.6 	---  Pacific and Nass Ranges<br>
+  7.1.7 	---  Strait of Georgia/Puget Lowland <br>
+  7.1.8 	---  Coast Range <br>
+  7.1.9     ---  Willamette Valley <br>
+  10.1.1	---  Thompson-Okanogan Plateau <br>
+  10.2.1	---  Mojave Basin and Range <br>
+  11.1.1	---  California Coastal Oak Woodlands <br>
+  11.1.3	---  Southern California Pine-Oak Mountains <br>
+
+#### We modified these 'Ecoregion' definitions three ways:<br>
+
+#### *Small Sample sizes*
+Some Ecoregions are represented by a small number of samples -- these are merged with adjacent ecoregions to get larger (more balanced) population sizes. 
+<br>
+  6.2.8, Eastern Cascade Slopes merged with Cascades, 6.2.7<br>
+  7.1.5, Coastal Hemlock-Spruce Forests merged with Puget Lowland, 7.1.7<br>
+  7.1.9, Willamette Valley merged with Coast Range (7.1.8) if west of longitude -122.950 (approximately the Willamette River), and merged with Cascades (6.2.7) if east of longitude -122.950<br>
+  10.1.1, Okanogan Plateau merged with Pacific and Nass Ranges, 7.1.6<br>
+  10.2.1, Mojave Basin/Range merged with Southern California Pine-Oak Mountains, 10.2.1
+
+#### *Extremely large geographic regions*
+Some Ecoregions span very large distances (e.g., "Coast Range" spans 1000+ km). These large regions were divided by state or province. 
+<br>
+  6.2.7, Cascade Range --- divide into OR and WA sub-regions<br>
+  7.1.7, Strait of Georgia/Puget Lowland --- divide into BC and WA sub-regions<br>
+  7.1.8, Coast Range --- divide into WA, OR and CA sub-regions
+
+#### *Geographically discontiguous regions*
+Finally, some Ecoregions have unusual shapes that are drawn to reflect floristic associations, and these can create geographic outliers. A total of 19 'Ecoregion outlier' samples are moved to adjacent ecoregions to create more contiguous populations. These adjustments are shown in the R code.
+
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+## Ecoregion re-classification: re-code Ecoregions with small sample sizes to a proximal ecoregions. Next, re-code large ecoregions to sub-regions. Finally, re-code names so that state/province is identified
+
+Mydata <- Mydata %>%
+  mutate(
+    eco3pop = case_when(
+      eco3pop == "6.2.8" ~ "OR.6.2.7", 	# E. Cascade Slopes merged with Cascades	
+      eco3pop == "7.1.5" ~ "7.1.7",	    # Coastal Hemlock-Spruce  merged with Puget/Strait of Georgia	
+      eco3pop == "10.1.1" ~ "BC.7.1.6",	# Okanagan Plateau merged with Pacific Range/North Cascades Range	
+      eco3pop == "7.1.9" & gps_longitude < -122.950 ~ "OR.7.1.8",	# West of Willamette merged with Coast Range	
+      eco3pop == "7.1.9" & gps_longitude > -122.950 ~ "OR.6.2.7",	# East of Willamette merged with Cascade Range
+
+      # CA samples lower than 35.0 degrees latitude defined as CA.11.1.3
+      gps_latitude < 35.0 ~ "CA.11.1.3",	
+
+      # CA samples between 35.0 and 39.0 degrees lat outside of 6.2.11 defined as  CA.11.1.1
+      eco3pop != "6.2.12" & gps_latitude > 35.0 & gps_latitude < 39.0 ~ "CA.11.1.1",
+
+      # U.S. and BC 'North Cascades' and BC 'Pacific and Nass Range' samples redefined as 'North Cascades'
+      eco3pop == "6.2.5" & state == "WA" ~ "BC.7.1.6",
+      eco3pop == "6.2.5" & state == "BC" ~ "BC.7.1.6",
+      eco3pop == "7.1.6" & state == "BC" ~ "BC.7.1.6",
+
+      # Divide Cascade Range 6.2.7 into WA and OR groups		
+      eco3pop == "6.2.7" & state == "OR" ~ "OR.6.2.7",	eco3pop == "6.2.7" & state == "WA" ~ "WA.6.2.7",	
+		
+      # Divide Coast Range 7.1.8 into CA, OR, and WA groups		
+      eco3pop == "7.1.8" & state == "CA" ~ "CA.7.1.8",	eco3pop == "7.1.8" & state == "OR" ~ "OR.7.1.8",	
+      eco3pop == "7.1.8" & state == "WA" ~ "WA.7.1.8", eco3pop == "7.1.8.CA" & state == "CA" ~ "CA.7.1.8",	
+      eco3pop == "7.1.8.OR" & state == "OR" ~ "OR.7.1.8",	eco3pop == "7.1.8.WA" & state == "WA" ~ "WA.7.1.8", 
+
+      # Divide Strait of Georgia/Puget Lowland 7.1.7 by country
+      eco3pop == "7.1.7" & state == "BC" ~ "BC.7.1.7",	eco3pop == "7.1.7" & state == "WA" ~ "WA.7.1.7",
+      eco3pop == "7.1.7.BC" & state == "BC" ~ "BC.7.1.7",	eco3pop == "7.1.7.WA" & state == "WA" ~ "WA.7.1.7",
+
+      # Re-code remaining unmodified codes to include state/province
+      eco3pop == "11.1.1" ~ "CA.11.1.1", eco3pop == "6.2.11" ~ "CA.6.2.11", eco3pop == "6.2.12" ~ "CA.6.2.12",
+
+   TRUE ~ as.character(eco3pop)
+  )
+ )
+
+## Next, re-code geographic outliers to nearest contiguous Ecoregion; save the modified data as a new data frame 'Mapledata'
+Mapledata <- Mydata %>%
+  mutate(
+    eco3pop = case_when(
+
+      # BC Strait of Georgia/Puget Lowland 7.1.7 moved to BC Pacific and Nass Ranges 7.1.6		
+      sampleID == "REPL_13_lf_50_R1_459765" ~ "BC.7.1.6", sampleID == "LZ11_3_lf_50_R1_459765" ~ "BC.7.1.6",
+      sampleID == "LZ11_8_lf_50_R1_459765" ~ "BC.7.1.6", sampleID == "LZ11_6_lf_50_R1_459768" ~ "BC.7.1.6",
+
+      # BC Pacific and Nass Ranges 7.1.6 moved to BC Strait of Georgia/Puget Lowland 7.1.7
+      sampleID == "LZ6_4_lf_50_R1_459765" ~ "BC.7.1.7", sampleID == "LZ6_6_lf_50_R1_459765" ~ "BC.7.1.7", 
+      sampleID == "LZ6_18_lf_50_R1_459765" ~ "BC.7.1.7",sampleID == "LZ6_19_lf_50_R1_459765" ~ "BC.7.1.7", 
+      sampleID == "LZ6_20_lf_50_R1_459765" ~ "BC.7.1.7", 
+
+      # Klamath Mountains 6.2.11 moved to OR Coast Range 7.1.8
+      sampleID == "WZ8_6LEAF_lf_50_R1_459768" ~ "OR.7.1.8", 
+
+      # CA Coast Oak Woodlands 11.1.1 moved to Siskiyou 6.2.11		
+      sampleID == "LZ42_15_lf_50_R1_459765" ~ "CA.6.2.11", sampleID == "LZ43_5_lf_50_R1_459765" ~ "CA.6.2.11",
+
+      # CA Coast Oak Woodlands 11.1.1 moved to Sierra 6.2.12		
+      sampleID == "LZ44_13_lf_50_R1_459765" ~ "CA.6.2.12", sampleID == "LZ46_12_lf_50_R1_459765" ~ "CA.6.2.12", 
+      sampleID == "WZ13_2LEAF_lf_50_R1_459768" ~ "CA.6.2.12", sampleID == "LZ53_2_lf_50_R1_459765" ~ "CA.6.2.12", 
+
+   TRUE ~ as.character(eco3pop)
+  )
+ )
+dim(Mapledata)
+```
+
+#### *Filtering samples* 
+The dataset contains control samples (replicates, blanks) and a few samples of unknown geographic origin. They are removed at this step to create a 'population' dataset.
+
+```{r echo=TRUE, results=FALSE, warning=FALSE}
+  # retain only individuals who are part of the population screen
+Mapledat4  <- filter(Mapledata, Mapledata$treat2 == "populatn")
+  #dim(Mapledat4)
+  # filter individuals missing location information
+Mapledat5 <- filter(Mapledat4, Mapledat4$state != "UNK")
+Mapledat5 <- Mapledat5 %>% filter(!is.na(Mapledat5$state))
+Mapledat5 <- Mapledat5 %>% filter(!is.na(Mapledat5$eco3pop))
+Mapledat5 <- Mapledat5 %>% filter(!is.na(Mapledat5$lat_pop))
+Mapledat5 <- Mapledat5[order(Mapledat5$eco3pop),]
+tbl_df(Mapledat5)
+  #dim(Mapledat5)
+```
+<br>
+*****
+
+### Geographic distribution
+ 
+The map below shows where samples were collected. Locations are colored by the *eco3pop*, which are modifed as noted above
+
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE,fig.cap="Counts by Ecoregion"}
+#a simple barplot of counts by eco3pop
+
+ecocount <- ggplot(data = Mapledat5, aes(x=eco3pop)) + geom_bar() +
+  stat_count(aes(label= ..count..), geom ="text", vjust=-0.5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#'map' is used by 'maps' and 'purr'; give 'maps' precedence
+map <- maps::map
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+class(world)
+states <- st_as_sf(map("state", plot = FALSE, fill = TRUE))
+#head(states)
+```
+
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE, fig.align="center", fig.height=10.0, fig.cap="Figure: Distribution of Adventure Scientist samples, with sample locations colored by level III ecoregion"}
+#svglite("plot1_20201208.svg", width = 6, height = 10)     #uncomment to print to SVG
+
+samplemap2<- ggplot(data = world) +
+  geom_sf() + geom_sf(data = states, fill = NA) + 
+  geom_point(data = Mapledat5, aes(x = gps_longitude, y = gps_latitude, fill = factor(eco3pop)), 
+  size = 2, shape = 23, alpha = 0.75) + #scale_fill_brewer(palette="Set3") + 
+  scale_fill_manual(values=as.vector(cols25(12))) +
+  coord_sf(xlim = c(-128.0, -115.0), ylim = c(32.53, 52.0), expand = FALSE) +
+  labs(fill=paste('Level III\nEcoregion', sep=''), x ="Longitude", y = "Latitude") 
+samplemap2
+
+#dev.copy(png,"./Maple_SNP_map.png", width = 680, height = 1600, units = "px")
+#dev.off()												   #uncomment to print to SVG
+```
+*****
+
+### `adegenet` analysis
+We'll now read the dataset into `adegenet` and make a `genind` data file. `adegenet` can then apply call rate and 'missingness' filters, and then perform pop-gen analyses.  
+
+```{r echo=TRUE, results=TRUE, message=TRUE,warning=FALSE}
+## First, read SNPs, and then define individuals and populations
+locus <- Mapledat5[, -c(1:16)]                                # save matrix of snps
+colnames(locus) <- gsub("\\.", "_", colnames(locus))          # locus names can't have "."
+ind <- as.character(Mapledat5$sampleID)                       # labels of the individuals
+population <- as.character(Mapledat5$eco3pop)                 # labels of the populations(=eco3pop)
+
+#convert to genind, adegenet format; define strata ('population' in this example)
+Mapledata1 <- df2genind(locus, ploidy = 2, ind.names = ind, pop = population, sep = "")
+strata_df <- data.frame(pop(Mapledata1)) # Create a data frame from the list.
+strata(Mapledata1) <- strata_df
+#Mapledata1
+
+## SET THE GENOTYPE 'MISSINGNO' CUTOFF to 0.10. This removes genotypes showing > 10% missing information
+Mapledata1_geno <- missingno(Mapledata1, type = "geno", cutoff = 0.10, quiet = FALSE, freq = FALSE)
+
+## SET THE SNP 'MISSINGNO' CUTOFF TO 0.10. This removes SNPS showing > 10% missing information 
+Mapledata1_genoloc <- missingno(Mapledata1_geno, type = "loci", cutoff = 0.10, quiet = FALSE, freq = FALSE)
+summary(Mapledata1_genoloc)
+```
+
+####Save copies of the adegenet-filtered dataset as 1 and 2 column genotype files. 
+```{r echo=TRUE, results=FALSE, message=FALSE,warning=FALSE}
+Maple1col <- genind2df(Mapledata1_genoloc, sep = "", usepop = TRUE, oneColPerAll = TRUE)
+write.csv(Maple1col,"./MapleSNP_adegenet_1142i127s_filtered_2col.csv")
+
+Maple2col <- genind2df(Mapledata1_genoloc, sep = "", usepop = TRUE, oneColPerAll = FALSE)
+write.csv(Maple2col,"./MapleSNP_adegenet_1142i127s_filtered_1col.csv")
+```
+
+#### Save a copy of the adegenet-filtered data in genepop format and analyze LD
+```{r echo=TRUE, results=FALSE, message=FALSE,warning=FALSE}
+library(miscTools)
+library(genepop)
+gen <-  Mapledata1_genoloc
+write.table(gen, file = "./maple_genepopinput.txt", sep = "\t")
+
+#### function genind2genepop - converts files from genind to genepop -----
+# here, we convert 'gen' to a file 'maple_genepopinput.txt' 
+# because genepop works most reliably from an input file
+genind2genepop = function(data, file=""){
+  
+  ## Check input file a genind object
+  if(!"genind" %in% class(data)){
+    warning("Function was designed for genind objects.")
+  }
+  
+  ## Check adegenet and miscTools are installed
+  if(!require(adegenet)){install.packages("adegenet")}
+  if(!require(miscTools)){install.packages("miscTools")}
+  
+  # ---------------- #
+  # Preamble
+  # ---------------- #
+  
+  ## Convert genind to dataframe object
+  df = genind2df(data, usepop=FALSE)
+  
+  ## Convert A-01, C-02, G-03, T-04
+  mat = as.matrix(df)
+  mat = apply(mat, FUN=gsub, MARGIN=2, pattern="A", replacement="01") 
+  mat = apply(mat, FUN=gsub, MARGIN=2, pattern="C", replacement="02")
+  mat = apply(mat, FUN=gsub, MARGIN=2, pattern="G", replacement="03")
+  mat = apply(mat, FUN=gsub, MARGIN=2, pattern="T", replacement="04")
+  
+  ## Convert NAs to 0000
+  mat[is.na(mat)] = "0000"
+  
+  ## Add a column containing individual names with a comma afterwards
+  ind = paste(indNames(data),",", sep="")
+  mat = cbind(ind, mat)
+  
+  # ---------------- #
+  # Insert a Pop row
+  # ---------------- #
+  
+  ## Pop label that will separate each population
+  popline = c("Pop", rep("", ncol(mat)-1 ))
+  
+  ## Count the number of individuals in each population
+  pop_counts = data.frame(Counts = summary(data$pop))
+  
+  ## Add a column totalling the cumulative sum 
+  pop_counts$Sum = cumsum(pop_counts$Counts)
+  
+  ## Insert a Pop row between each population
+  for (i in 1:nrow(pop_counts)){
+    
+    # i is the row number and increases by 1 after each interation to compensate 
+    # for the extra row being inserted each run through the loop
+    pop.row = rep(NA, nrow(pop_counts))
+    pop.row[i] = pop_counts$Sum[i] + i
+    mat = insertRow(mat, pop.row[i], popline) 
+  }
+  
+  # Remove the last Pop row
+  mat = mat[-nrow(mat), ] 
+  
+  # ---------------- #
+  # Construct the Genepop file
+  # ---------------- #
+  
+  ## Genepop header
+  file_date = format(Sys.time(), "%Y%m%d@%H%M") # date and time
+  header = paste("Genepop file format", file_date)
+  
+  ## List of loci names separated by commas
+  loc_names = paste(locNames(data), collapse=",")
+  
+  # Insert title, locus and pop rows at the beginning
+  mat = insertRow(mat, 1, c(header, rep("", ncol(mat)-1 )))
+  mat = insertRow(mat, 2, c(loc_names, rep("", ncol(mat)-1 )))
+  mat = insertRow(mat, 3, popline)
+  
+  # Export file
+  write.table(mat, file=file, quote=FALSE, col.names=F, row.names=F)
+}
+genind2genepop(gen, file="z_example_genepop.txt")
+
+#this step calls genepop, reads the 'txt' file, and writes to an output 'DIS' file
+
+#test_LD(inputFile = "maple_genepop.txt", outputFile = "maple.txt.DIS",
+        #dememorization = 100, batches = 100, iterations = 100,   # use this setting for testing
+#        dememorization = 5000, batches = 100, iterations = 5000,  # use this setting for more accurate testing - requires several hours
+#        verbose = interactive())
+
+#write_LD_tables(locinfile,'maple.txt.TAB')
+```
+*****
+
+### Observed heterozygosity (H_obs) by population
+
+We use `seppop` to split the data by population, then `lapply` to calculate population-specific H_obs averaged across loci. For this evaluation, 'pop' is Level III Ecoregion.  
+
+Conclusion: Results show that there is limited difference in heterozygosity across BC, WA, OR, and northern CA. However, 3 Ecoregions --- Sierra Nevada (6.2.12), California Coastal Oak Woodlands (11.1.1) and Southern California Pine-Oak Mountains (11.1.3) --- show highly reduced heterozygosity at these SNPs.
+
+```{r echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+n.pop <- seppop(Mapledata1_genoloc) 
+mean.hobs <- do.call("c", lapply(n.pop, function(x) mean(summary(x)$Hobs))) 
+mean.hobs[is.nan(mean.hobs)] <- NA 
+# pass results to data frame; change rowname to column; rename row as "eco3pop"
+mean.hobs.df = data.frame(mean.hobs)
+mean.hobs.tb = rownames_to_column(mean.hobs.df)
+names(mean.hobs.tb)[names(mean.hobs.tb)=="rowname"] <- "eco3pop"
+mean.hobs.tb %>% tbl_df %>% rmarkdown::paged_table()
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.cap="Figure: Mean observed heterozygosity (H_obs) as a function of level III Ecoregion in ACMA"}
+#varname1a <- paste(basefilename,'_',today,'_Hobs_x_lat.svg')        #uncomment for SVG
+#svglite(varname1a, width = 8, height = 6)        					 #uncomment for SVG
+require(pals)
+plot4a <- ggplot(data=mean.hobs.tb, aes(x=eco3pop, y=mean.hobs, fill=eco3pop)) +         
+    geom_bar(stat="identity", color="black") + scale_fill_manual(values=as.vector(cols25(12))) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) + theme(legend.position="none")
+plot4a
+#dev.off()        													 #uncomment for SVG
+```
+
+### Expected heterozygosity (H_exp) by population
+
+We use `seppop` to split the data by population, then `lapply` to calculate population-specific H_exp averaged across loci. For this evaluation, 'pop' is Level III Ecoregion.  
+
+Conclusion: 
+As with H_obs, results show limited difference in expected heterozygosity across BC, WA, OR, and northern CA, but very strong reductions in central and southern California (6.2.12, 11.1.1, 11.1.3).
+   
+```{r echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+mean.hexp <- do.call("c", lapply(n.pop, function(x) mean(summary(x)$Hexp))) 
+mean.hexp[is.nan(mean.hexp)] <- NA 
+# pass results to data frame; change rowname to column; rename row as "eco3pop"
+mean.hexp.df = data.frame(mean.hexp)
+mean.hexp.tb = rownames_to_column(mean.hexp.df)
+names(mean.hexp.tb)[names(mean.hexp.tb)=="rowname"] <- "eco3pop"
+mean.hexp.tb%>% tbl_df %>% rmarkdown::paged_table()
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.cap="Figure: Mean observed heterozygosity (H_exp) as a function of Level III Ecoregion in ACMA"}
+#varname1b <- paste(basefilename,'_',today,'_Hexp_x_Lat.svg')        #uncomment for SVG
+#svglite(varname1b, width = 8, height = 6)        					 #uncomment for SVG
+require(pals)
+plot4b <- ggplot(data=mean.hexp.tb, aes(x=eco3pop, y=mean.hexp, fill=eco3pop)) +         
+    geom_bar(stat="identity", color="black") + scale_fill_manual(values=as.vector(cols25(12))) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) + theme(legend.position="none")
+plot4b
+#dev.off()        													 #uncomment for SVG
+```
+*****
+
+### Testing for HWE by population
+
+As above, we use `seppop` to split the data by population, then use `lapply` to calculate population-specific Hardy-Weinberg equilibrium for each SNP. We use the HW test from `pegas`, and estimate significance using the Fisher exact test (important: the output from this comparison is over 1,000 lines long ([12 populations * 129 loci each]), so tests are summarized using a matrix of P-values and a heatmap. 
+
+Conclusion: 
+As might be expected from H_obs and H_exp, trees in OR, WA, and BC show limited deviation from HWE expectations at these SNP markers. Trees from CA populations show stonger deviation from HWE, especially CA.11.1.1 and CA.11.1.3. One marker, Maple_4074, shows deviation from HWE across nearly alll populations. This general trend -- reduced minor allele frequencies and increased deviation from HWE -- is consistent with  *ascertainment bias*. The presence of geographic structure in allele frequencies is likely to be accompanied by deviations from assumptions of linkage equilibrium. 
+
+```{r echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+(mydat_hwe.pop <- seppop(Mapledata1_genoloc) %>% lapply(hw.test, B = 0))
+(mydat_hwe.mat<- sapply(mydat_hwe.pop, "[", i = TRUE, j = 3))        #Take the third column with all rows
+write.csv(mydat_hwe.mat, file = "./maple_dat_hwe.csv")               #save the output, just in case...
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.width=7.0, fig.height=14.0, fig.cap="Figure: Heatmap showing significant departures from HWE, with loci in rows and populations as columns. Loci shown in red are out of HWE with p<=0.05"}
+
+#varname2 <- paste(basefilename,'_',today,'_hwe_x_pop.svg')          #uncomment for SVG
+#svglite("varname2", width = 3.5, height = 8)         				 #uncomment for SVG
+library(dichromat)
+redwhite <- colorRampPalette(c('red','white'))(100)
+	alpha  <- 0.01
+	newmat <- mydat_hwe.mat
+	newmat[newmat > alpha] <- 1
+	library("lattice")
+	levelplot(t(newmat), xlab="eco3pop", ylab="locus", col.regions = redwhite, colorkey=FALSE, 
+	  scales=list(y=list(rot=0), x=list(rot=55)))
+#dev.off()        													 #uncomment for SVG
+```
+
+## Linkage (dis)Equilibrium
+
+To generate this plot, we calculated LD using Genepop (R version), then corrected P-values for multiple tests in each population using the Benjamini-Hochberg false discovery method. SNPs showing significant linkage (p<=0,05) were reduced to one SNP per linked pair by eliminating the SNP with the lowest minor allele frequency. If SNPs were linked to multiple loci, we retained the SNP with the fewest significant tests. This was done manually in a separate file. After filtering, we created a matrix of "p-values" for each locus by coding retained SNPs for each population as "1", and excluded SNPs as "0.05"; this is file "Maple_LE.tsv".
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple_le <- read.csv("Maple_LE.tsv", header = TRUE, sep="\t")
+maple_le2 <- as.data.frame(maple_le)
+y_levels <- select(maple_le2, LOCI)
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.width=7.0, fig.height=14.0, fig.cap="Figure: Heatmap showing significant departures from HWE, with loci in rows and populations as columns. Loci shown in red are in LD at p<=0.05 with at least one marker"}
+#varname3 <- paste(basefilename,'_',today,'_le_x_pop.svg')           #uncomment for SVG
+#svglite("varname3", width = 3.5, height = 8)         				 #uncomment for SVG
+library(dichromat)
+redwhite <- colorRampPalette(c('red','white'))(100)
+	alpha  <- 0.05
+  levelplot(t(maple_le2),data = NULL, aspect = "iso", xlab="eco3pop", ylab="loci", col.regions = redwhite, 
+    colorkey=FALSE, scales=list(y=list(rot=0), x=list(rot=55)))
+
+#dev.off()        													 #uncomment for SVG
+```
+*****
+
+### Differentiation  
+We computed Weir & Cockerham's F_ST and F_IS (WC84) as metrics of differentiation and inbreeding using the package `hierfstat`. These estimators are unbiased with respect to sample size.  As a reminder:
+
+*F_ST is the proportion of the total genetic variance contained in a subpopulation (S) relative to the total genetic variance (T). Values range from 0 (no differentiation) to 1 (fully differentiated).*  
+
+*F_IS, or the inbreeding coefficient, is the proportion of the variance in the subpopulation contained in an individual. Values range from 0 (no inbreeding) to 1 (complete inbreeding).*  
+
+Conclusion: 
+The estimated global F_ST --- *0.17* --- is impressively high for a forest tree, and it indicates strong spatial differentiation across the range of *ACMA* at these SNPs. The magnitude of F_IS is in the range of expectations for a tree known to exhibit [high outcrossing rates](https://www.nrcresearchpress.com/doi/10.1139/b04-136#.XgmsVm5FyM8).  
+
+Pairiwse F_ST values allow us to identify the populations that contribute to the high value of F_ST. In the Pacific Northwest (BC, WA, OR), pairwise Fst values are low, which is consistent with their continuous habitat, low dispersal resistance, and high average H_obs. Trees from the Klamath (6.2.11) and Coast (CA.7.1.8) Ranges represent a transition, showing intermediate differentiation to populations in the Pacific Northwest and California. Trees in central and southern California ecoregions are *strongly differentiated* from all other populations, and likely contribute to the high global F_ST. 
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+Mydata2 <- genind2hierfstat(Mapledata1_genoloc) 
+wc(Mydata2)                              # Weir & Cockerham estimates, global Fis, Fst
+```
+```{r echo=TRUE, results=FALSE,message=FALSE,warning=FALSE, fig.align="center", fig.height=8.0,}
+lower_tri <- genet.dist(Mapledata1_genoloc, method = "WC84")     # Weir & Cockerham estimates, pairwise Fst
+lower_tri.df <- as.data.frame(as.matrix(lower_tri))
+# reformat for heatmap; add a row with names to melt on, then melt
+lower_tri.df$names <- rownames(lower_tri.df)
+fst.df <- reshape2::melt(lower_tri.df, id.vars = "names")
+# rename the columns
+fst.df = rename(fst.df, Eco3group_1 = 'names')
+fst.df = rename(fst.df, Eco3group_2 = 'variable')
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.height=8.0, fig.cap="Figure: Heatmap of pairwise Fst values for population groups of ACMA"}
+#varname4 <- paste(basefilename,'_',today,'_FSTxlat.svg')        	 #uncomment for SVG
+#svglite(varname4, width = 8, height = 8)        					 #uncomment for SVG
+ggplot(data = fst.df, aes(x=reorder(Eco3group_1,value), y=reorder(Eco3group_2,value), fill = value)) +
+    geom_tile(color = "white") + geom_text(aes(label = round(value, 3)), size = 3) +
+    scale_fill_gradient2(low = "steelblue2", high = "red", mid = "white",
+      midpoint = 0.2, limit = c(0,0.6), space = "Lab", 
+      name="Pairwise\nFst") + theme_minimal() + 
+      labs(x ="Level 3 Ecoregion", y = "Level 3 Ecoregion") +
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+      size = 12, hjust = 1)) + coord_fixed()
+#dev.off()        													 #uncomment for SVG
+```
+*****
+
+### Minor allele frequency (MAF), global
+
+With the strong variation in H_obs, HWE, LE and Fst, there are likely strong differences in MAF. Here, we plot the mean `minor allele frequencies (MAF)` across SNP loci globally.
+
+Conclusion: 
+Most SNP loci show a minor allele frequencies above 0.25, but a substantial fraction show low values. These loci may not be informative for individualization, but they may be informative for geolocalization.
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+x <- Mapledata1_genoloc
+apply(tab(x, freq=TRUE),2,mean, na.rm=TRUE)
+m.freq <- minorAllele(x)                                 			 # minor allele frequencies
+m.freq
+data1 = data.frame(m.freq)
+data1 = data1[order(m.freq),]; 
+plot(data1, xlab="Locus number", ylab="Minor Allele Frequency", 
+     main="Observed minor allele frequency per locus in ACMA")
+```
+
+### Minor allele frequency (MAF) by Ecoregon
+
+Conclusion: 
+There are large differences in minor allele frequencies in populations from the Pacific Northwest versus California. A large number of SNPs are fixed or nearly fixed California Ecoregions CA.11.1.1, CA.11.1.3, and CA.6.2.12.
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+df <- NULL
+# we loop through the dataset, ask adegenet to calculate 'minorAllele' by eco3pop, and create 
+# a new data frame of minor allele frequencies by locus and by eco3pop
+uniq <- unique(unlist(Mapledata1_genoloc@pop))
+uniq
+
+for (i in 1:length(uniq))  {
+    x <- subset(Mapledata1_genoloc, subset = Mapledata1_genoloc@pop == uniq[i])
+    apply(tab(x, freq=TRUE),2,mean, na.rm=TRUE)
+    m.freq <- minorAllele(x)                                 # minor allele frequencies
+    data1 = data.frame(m.freq)
+    data1 = data1[order(m.freq),]; 
+
+    temp_df <- data.frame(x=1:127, y=data1, z = i)
+    df <- rbind(df,temp_df)
+    } 
+
+# Rename 'x' as SNP, 'y' as MAF, and 'z' as eco3pop
+    df <- df %>% rename(SNP = x, MAF = y)
+    df$eco3pop[df$z==1]<-"BC.7.1.6"
+    df$eco3pop[df$z==2]<-"BC.7.1.7"
+    df$eco3pop[df$z==3]<-"CA.11.1.1"
+    df$eco3pop[df$z==4]<-"CA.11.1.3"
+    df$eco3pop[df$z==5]<-"CA.6.2.11"
+    df$eco3pop[df$z==6]<-"CA.6.2.12"
+    df$eco3pop[df$z==7]<-"CA.7.1.8"
+    df$eco3pop[df$z==8]<-"OR.6.2.71"
+    df$eco3pop[df$z==9]<-"OR.7.1.8"
+    df$eco3pop[df$z==10]<-"WA.6.2.7"
+    df$eco3pop[df$z==11]<-"WA.7.1.7"
+    df$eco3pop[df$z==12]<-"WA.7.1.8"
+    df$eco3pop[df$z>=12]<-"13"
+    df <- filter(df, df$eco3pop != "13")
+colnames(df)
+
+tapply(df$MAF, df$eco3pop, summary)
+#varname5 <- paste(basefilename,'_',today,'_MAFxpop.svg')        	 #uncomment for SVG
+#svglite(varname5, width = 9, height = 6)        					 #uncomment for SVG
+	require(pals)
+	p <- ggplot(df,aes(x=SNP,y=MAF,group=eco3pop, colour=factor(eco3pop),linetype=factor(eco3pop))) + 
+		geom_line(size = 0.8) + scale_color_manual(values=cols25(12)) + xlab("Locus number") + 
+		ylab("Minor Allele Frequency") #+ scale_color_discrete(name  = "Level 3\nEcoregion")
+	p
+#dev.off()        													 #uncomment for SVG
+```
+*****
+
+## Discriminant Analysis of Principal Components, or DAPC
+   
+We used `(DAPC)` to build a distance-based classification model for assigning samples to genetic groups. DAPC builds clusters by k-means clustering over a range of group numbers (K). Optimal numbers of groups can be defined manually, or using automated selection; we used manual selection, but the automated `goodfit` method yields identical results.  
+
+The first step in DAPC is to identify the number of clusters required to describe the data. This is done with the 'find.clusters' function (based on kmeans from `stats`) and a summary statistic (BIC). As noted in the adegenet manual...
+
+> *"The concept of ”true k” is fairly hypothetical. This does not mean that 
+> clustering algorithms should be discarded, but that reality is more complex 
+> than a few clear-cut populations"* 
+
+Here, we evaluate ranges of k between 1 and 50:
+
+NOTE: This section has to be run interactively. It is commented out in this RMarkdown document.
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+#varname6 <- paste(basefilename,'_',today,'_DAPC_BIC.svg')        	 #uncomment for SVG
+#svglite(varname6, width = 9, height = 6)        					 #uncomment for SVG
+grp <- find.clusters(Mapledata1_genoloc, max.n=50, n.pca=200, scale=FALSE)
+plot(grp$Kstat, type="b", col="blue")  
+#dev.off()        													 #uncomment for SVG
+```
+
+Based on BIC, a broad range K's from 8 to 23 provide near-optimal results. The number of populations in our study (K=12) is near the optimal BIC, so we use K=12 for our analysis.
+
+Next, we estimate a reasonable number of PCs to retain for DAPC analysis. Adegenet recommends using the cross validation to identify numbers of PCs that offer high power of discrimination without over-fitting. We will evaluate all PCs in this cross-validation test:
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+
+svglite("DAPC_Cluster_xval.svg", width = 9, height = 6)
+set.seed(20200929)
+pramx <- xvalDapc(tab(Mapledata1_genoloc, NA.method = "mean"), pop(Mapledata1_genoloc))
+names(pramx)
+pramx[-1]
+#names.grp <- names(grp)
+
+dev.off()
+```
+
+Cross-validation shows a broad range of values that yield comparatively high assignment success and low root mean squared errors. For this analysis, we will use 80 PCs.
+
+With this information, we can now run DAPC, determining the fit of the data to a near-optimal number of groups (K=12) and informative PCs (N = 80).
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+## using Kmeans and DAPC in adegenet 
+set.seed(20200929) 
+grp <- find.clusters(Mapledata1_genoloc, n.clust = 12, n.pca = 80,
+  choose.n.clust=TRUE)  #alternatively can use goodness of fit, minus eval of step change
+names.grp <- names(grp)
+```
+
+This is a list of the output fields from DAPC, with example data
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+knitr::kable(names.grp)
+head(grp$grp)
+Kmax <- length(grp$size)
+Kmax
+## define a 'pals' palette based on the number of DAPC groups, 'Kmax'
+require(pals)
+colsKmax <- (values=as.vector(cols25(Kmax)))
+```
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+## extract DAPC group names - first, create a data.table, and turn row names into column data
+dapc_grp <- data.frame(grp$grp)
+library(data.table)
+setDT(dapc_grp, keep.rownames = TRUE)[]
+setnames(dapc_grp, 1, "sampleID")
+
+## create a new data.frame to hold the original data and join by 'sampleID'; also rename default column names
+indiv <- data.frame(Mapledat5)
+testing <- left_join(dapc_grp, indiv, by = "sampleID")
+```
+
+## now run DAPC and plot the groups with n.clust = 12, n.pca = 20, and n.da = 100
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.cap="Figure: DAPC plot of 'goodfit' clusters"}
+#varname7 <- paste(basefilename,'_',today,'_DAPC_scatter.png')       #uncomment for SVG
+#svglite(varname7, width = 6, height = 4)        					 #uncomment for SVG
+	dapc1 <- dapc(Mapledata1_genoloc, grp$grp, var.contrib = TRUE, n.da = 20, n.pca = 100) 
+	scatter(dapc1, posi.da="bottomleft", scree.pca = TRUE, posi.pca = "bottomright", col=colsKmax)
+#dev.off()        													 #uncomment for SVG
+
+#to identify the SNPs contributing to DAPC axes 1 & 2, we can make a loading plot
+#set.seed(4)
+	contrib1 <- loadingplot(dapc1$var.contr, axis = 1, thres = 0.01, lab.jitter = 5)
+	contrib2 <- loadingplot(dapc1$var.contr, axis = 2, thres = 0.015, lab.jitter = 5)
+#varname8 <- paste(basefilename,'_',today,'_DAPC_loading.svg')       #uncomment for SVG
+#svglite(varname8, width = 6, height = 4)        					 #uncomment for SVG
+	temp <- optim.a.score(dapc1)
+#dev.off()        													 #uncomment for SVG
+```
+
+A summary of DAPC results
+
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.cap="Figure: DAPC plot of 'goodfit' clusters"}
+summary(dapc1)
+```
+
+### DAPC Composition plots  
+
+Composition plots ('compoplots') are barplots that represent DAPC group assignment probabilities of an individual across multiple possible groups. Compoplots are difficult to visualize across all samples, so we divided compoplots into Level 3 Ecoregions.
+
+```{r echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+library(reshape2)
+dapc.results <- as.data.frame(dapc1$posterior)
+dapc.results$pop <- pop(Mapledata1_genoloc)           
+dapc.results$indNames <- rownames(dapc.results)
+dapc.results <- melt(dapc.results)
+colnames(dapc.results) <- c("Eco3Pop","sampleID","Assigned_Pop","Posterior_membership_probability")
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE,fig.align="center", fig.height=10.0, fig.cap="Figure: DAPC composition plots by population."}
+#varname9 <- paste(basefilename,'_',today,'_DAPC_compoplot.svg')     #uncomment for SVG
+#svglite(varname9, width = 6, height = 9)        					 #uncomment for SVG
+	p <- ggplot(dapc.results, aes(x=sampleID, y=Posterior_membership_probability, fill=Assigned_Pop)) + 
+		theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+	p <- p + geom_bar(stat='identity') 
+	p <- p + scale_fill_manual(values=as.vector(cols25(Kmax))) 
+	p <- p + facet_wrap(~Eco3Pop, scales = "free", dir = "h", nrow = 4) 
+	p <- p + theme(strip.text.y = element_text(angle = 0))
+	p
+#dev.off()        													 #uncomment for SVG
+```
+
+## Illustrating DAPC group membership on the landscape
+
+This `DAPC` analysis built a model of group membership assuming K = 12 genetic groups. Below, we plot the samples on the range map to show the geographic distribution of DAPC groups in our sample.
+
+Conclusion: 
+As might be expected by variation in heterozosity and F_ST, there is a strong geographic genetic structure across the range of *ACMA*. For example:<br><br>
+    * Trees in BC and WA show evidence of differentation by longitude (west -> east) and latitude (to a lesser degree). <br>
+    * Populations in OR show weak longitudinal differentiation, with DAPC groups but stronger latitudinal differentiation, with trees Klamath region appearing distinct. <br>
+    * Trees in CA show strong differentiation across longitude and latitude.<br>
+With such strong differentiation between Ecoregions, we will calculate genotype probabilities for each ecoregion separately. 
+
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE, fig.align="center", fig.height=10.0, fig.cap="Figure: Distribution of bigleaf maple samples, colored by DAPC group"}
+library("maps")
+library("mapproj")
+Mapledat5.dapc <- merge(x = Mapledat5, y = dapc_grp, by = "sampleID", all = TRUE)
+
+#varname10 <- paste(basefilename,'_',today,'_DAPCxmap.svg')           #uncomment for SVG
+#svglite(varname10, width = 7, height = 18)        					 #uncomment for SVG
+	dapcmap <- ggplot(data = world) + geom_sf() + geom_sf(data = states, fill = NA) + 
+	geom_point(data = Mapledat5.dapc, aes(x = gps_longitude, y = gps_latitude, fill = factor(grp.grp)), 
+    size = 2, shape = 23, alpha = 0.70) + scale_fill_manual(values=as.vector(cols25(Kmax))) + 
+    coord_sf(xlim = c(-128.0, -115.0), ylim = c(32.53, 52.0), expand = FALSE) +
+    labs(fill=paste('DAPC Groups', sep=''), x ="Longitude", y = "Latitude") 
+dapcmap
+
+#dev.off()        													 #uncomment for SVG
+```
+*****
+
+### Genotype Probabilities  
+
+For *ACMA* forensic work, we need to estimate *combined random match probability* for a genotype, or the *combined profile probability*. For these calculations, linkage equilibrium **is** assumed so SNPs need to be filtered for markers violating assumptions of LE.  
+
+We use the library `poppr` to compute genotype probabilities globally and by population (`eco3pop`). `poppr` computes the log of these probabilities, and we use these values to compute MEDIAN, minimum, and maximum genotype probabilities.
+
+#### *Global Genotype Probabilities*
+
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+## calculate the combined random genotypic probability for every genotype, globally...
+global.pgen <- pgen(Mapledata1_genoloc, log = TRUE) %>%                 # calculate global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                                            # calculate sums of each row
+  as.data.frame(global.pgen)                                            # create a data frame of results
+
+## calculate the combined random genotypic probability for every genotype, by population...
+popul.pgen <- pgen(Mapledata1_genoloc, by_pop = TRUE, log = TRUE) %>%   # calculate pop pgen matrix
+  rowSums(na.rm = TRUE) #%>%                                            # calculate sums of each row
+  as.data.frame(popul.pgen)                                             # create a data frame of results
+```
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+## produce a summary of the global genotypic probabilities
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+```
+**Global genotype probabilities for *ACMA***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_summary.csv")  
+#print the results using a paged HTML table
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table()
+``` 
+
+#### *Ecoregion Genotype Probabilities*
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+## produce a summary of genotypic probabilities, by population
+maple.pgen_pop.sum <- maple.pgen %>% group_by(eco3pop) %>%
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+names(maple.pgen_pop.sum)[1:7] <- c("eco3pop","log_med_pgen_pop","log_min_pgen_pop",
+      "log_max_pgen_pop","med_pgen_pop","min_pgen_pop","max_pgen_pop")
+#capture.output(maple.pgen_pop.sum, file = "maple_pgen_pop_summary.csv")
+# print the results using a paged HTML table
+maple.pgen_pop.sum %>% tbl_df %>% rmarkdown::paged_table()
+```
+*****
+
+### Population Genotype Probabilities, accounting for LD
+
+In this section, we compute genotype probabilities for each Ecoregion using only markers that do not violate the assumption of LD. As noted previously, we computed pairwise LD for all SNPs by Ecoregion using Genepop. In Ecoregion with a small number of SNP pairs violating LD, we removed one of the pair SNPs from analysis (always the SNP with the lowest MAF). In Ecoregions showing a large number of SNP pairs violating LD, we determined the number of significant comparisons per marker. We then removed marker pairs, by starting with the marker with the fewest significant pairwise comparisons, and then moving to markers with larger numbers of significant comparisons. This was repeated until no additional markers could be added.
+
+#### *Random genotypic probability for OR.6.2.7, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_OR627 <- popsub(Mapledata1_genoloc, sublist = c("OR.6.2.7"))
+locNames(Mydat_OR627)
+	
+	Mydat_OR627_filt <- Mydat_OR627[,loc=c(-71, -89)]   
+  # remove 2 loci [Maple_4186, M_4723]
+	
+	global.pgen <- pgen(Mydat_OR627_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+	rowSums(na.rm = TRUE) #%>%                             # calculate the sums of each row
+	as.data.frame(global.pgen)                             # create a data frame of the results
+
+	## calculate combined random genotype probability for every genotype
+	popul.pgen <- pgen(Mydat_OR627_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix
+	rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+	as.data.frame(popul.pgen)                               # create a data frame of the results
+
+  # summary of the global genotype probabilities - global and population should be identical [this is a check]
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+maple.pgen
+
+  names(maple.pgen)[1:3] <- c("sampleID","pgen_glob","pgen_pop")
+  maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_pop","eco3pop")]
+  maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_OR627_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, OR.6.2.7***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table()         # print results to a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for OR.7.1.8, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+## calculate the random genotypic probability for genotypes in OR.7.1.8, after dropping SNPs in LD...
+Mydat_OR718 <- popsub(Mapledata1_genoloc, sublist = c("OR.7.1.8"))
+  locNames(Mydat_OR718)
+Mydat_OR718_filt <- Mydat_OR718[,loc=c(-3,-71,-80)]   # remove locus 3, 72, 80 from the list [AM1f0287,M_4186, M_4455]
+
+global.pgen <- pgen(Mydat_OR718_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_OR718_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+```
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_OR627_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, OR.7.1.8***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for WA.7.1.7, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_WA717 <- popsub(Mapledata1_genoloc, sublist = c("WA.7.1.7"))
+locNames(Mydat_WA717)
+Mydat_WA717_filt <- Mydat_WA717[,loc=c(-3,-27,-31,-71,-99,-102)]
+
+# remove 6 loci from the list; AM1F0287,M_0121,M_0823, M_4186, M_4998, M_5112)
+
+global.pgen <- pgen(Mydat_WA717_filt, log = TRUE) %>%   # calculate the global pgen matrix, as log(pgen)
+rowSums(na.rm = TRUE) #%>%                              # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_WA717_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## summary of the global genotype probabilities - global and population should be identical [this is a check]
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, WA.7.1.7***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for WA.7.1,8, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_WA718 <- popsub(Mapledata1_genoloc, sublist = c("WA.7.1.8"))
+  locNames(Mydat_WA718)
+Mydat_WA718_filt <- Mydat_WA718[,loc=c(-5,-27,-31,-45,-61,-71,-94,-99,-116,-121)]
+
+# remove 10 loci from the list [AM1f0481, M_0121, M0823, M2074, M3941, M4186, M4847, M4998, M6560, M7588]
+
+global.pgen <- pgen(Mydat_WA718_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_WA718_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+``` 
+
+**Global genotype probabilities for *ACMA, WA.7.1.8***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+
+*****
+#### *Random genotypic probability for WA.6.2.7, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_WA627 <- popsub(Mapledata1_genoloc, sublist = c("WA.6.2.7"))
+locNames(Mydat_WA627)
+Mydat_WA627_filt <- Mydat_WA627 
+
+# NO LOCI ARE OUT OF LINKAGE EQUILIBRIUM; RETAIN ALL
+
+global.pgen <- pgen(Mydat_WA627_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_WA627_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, WA.6.2.7***
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for BC.7.1.6, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_BC716 <- popsub(Mapledata1_genoloc, sublist = c("BC.7.1.6"))
+locNames(Mydat_BC716)
+Mydat_BC716_filt <- Mydat_BC716[,loc=c(-27,-71,-73,-77,-99,-108,-113)]   
+
+# remove 7 loci [M_0121,M4186,M4258,M4385,M4998,M5463,M6157]
+
+global.pgen <- pgen(Mydat_BC716_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_BC716_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, BC 7.1.6***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for BC.7.1.7, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_BC717 <- popsub(Mapledata1_genoloc, sublist = c("BC.7.1.7"))
+locNames(Mydat_BC717)
+Mydat_BC717_filt <- Mydat_BC717[,loc=c(-28,-71)]   
+
+# remove 2 loci from the list [M_4186,M0305]
+
+global.pgen <- pgen(Mydat_BC717_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_BC717_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, BC 7.1.7***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for CA.11.1.1, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_CA1111 <- popsub(Mapledata1_genoloc, sublist = c("CA.11.1.1"))
+locNames(Mydat_CA1111)
+Mydat_CA1111_filt <- Mydat_CA1111[,loc=c(-1,-2,-3,-5,-6,-7,-9,-11,
+    -13,-14,-15,-18,-20,-21,-22,-23,-25,-28,-29,-30,-31,-33,-36,-39,
+    -42,-43,-44,-47,-48,-50,-51,-52,-54,-56,-57,-58,-59,-63,-64,-65,
+    -66,-69,-71,-73,-74,-77,-78,-79,-86,-87,-90,-91,-92,-95,-97,-98,
+    -99,-101,-102,-103,-105,-106,-107,-108,-109,-110,-112,-113,-114,
+    -115,-117,-118,-120,-121,-122,-124,-125,-126
+    )]
+
+# remove 78 loci [1f22725,1f0215,1f0287,1f0481,1f0524,1f0924,1f0984,
+    #1f1228,1f2335,1f5928,2f20123,2f0049,2f0234,2f0290,2f0346,2f0617,
+    #M0020,M0305,M0659,M0679,M0823,M1086,M12182,M1481,M1856,M1906,
+    #M2059,M2109,M2155,M2793,M3075,M3089,M3120,M3252,M3784,M3814,
+    #M3882,M3999,M4002,M4044,M4049,M4144,M4186,M4258,M4278,M4385,
+    #M4393,M4438,M4665,M4679,M4724,M4731,M4829,M4850,M4906,M4923,
+    #M4998,M5095,M5112,M5227,M5287,M5418,M5421,M5463,M5646,M5761,
+    #M6002,M6157,M6318,M6339,M6578,M6626,M7509,M7588,M7702,M8509,
+    #M8688,M9048]
+
+global.pgen <- pgen(Mydat_CA1111_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_CA1111_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, CA 11.1.1***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for CA.11.1.3, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_CA1113 <- popsub(Mapledata1_genoloc, sublist = c("CA.11.1.3"))
+locNames(Mydat_CA1113)
+Mydat_CA1113_filt <- Mydat_CA1113[,loc=c(-2,-6,-7,-9,-11,-13,-14,-15,
+    -16,-17,-18,-19,-21,-22,-25,-28,-29,-30,-31,-33,-34,-39,-40,-41,
+    -42,-43,-45,-47,-48,-50,-51,-54,-55,-56,-57,-58,-59,-62,-63,-64,
+    -66,-67,-70,-71,-72,-74,-75,-77,-79,-80,-81,-84,-85,-86,-88,-90,
+    -91,-92,-93,-95,-97,-98,-99,-100,-102,-103,-105,-106,-108,-109,-110,-111,
+    -112,-113,-114,-115,-116,-117,-118,-119,-120,-122,-123,-125,-126
+    )]                                     
+# remove 78 loci [1f0215,1f0524,1f0924,1f0984,1f1228,1f2335,1f5928,2f20123,
+    #2f0009,2f0018,2f0049,2f0218,2f0290,2f0346,M0020,M0305,M0659,M0679,
+    #M0823,M1086,M10862,M1481,M1489,M1557,M1856,M1906,M2074,M2109,
+    #M2155,M2793,M3075,M3120,M3136,M3252,M3784,M3814,M3882,M3989,
+    #M3999,M4002,M4049,M4074,M4174,M4186,M4218,M4278,M4308,M4385,
+    #M4438,M4455,M4472,M4604,M4663,M4665,M4696,M4724,M4731,M4829,
+    #M4840,M4850,M4906,M4923,M4998,M5062,M5112,M5227,M5287,M5418,
+    #M5463,M5646,M5761,M5820,M6002,M6157,M6318,M6339,M6560,M6578,
+    #M6626,M6682,M7509,M7702,M7856,M8688,M9048]
+
+global.pgen <- pgen(Mydat_CA1113_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_CA1113_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, CA 11.1.3***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for CA.6.2.11, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_CA6211 <- popsub(Mapledata1_genoloc, sublist = c("CA.6.2.11"))
+locNames(Mydat_CA6211)
+Mydat_CA6211_filt <- Mydat_CA6211[,loc=c(-3,-6,-8,-9,-10,-16,-17,-20,
+    -21,-22,-15,-31,-34,-41,-42,-43,-46,-51,-52,-53,-56,-59,-61,-62,
+    -64,-69,-71,-72,-73,-74,-75,-79,-88,-91,-95,-96,-98,-102,-105,-106,
+    -107,-113,-122,-126,-127)]
+
+# discard 45 loci [1f0287,1f0524,1f0927,1f0984,1f1134,2f0009,2f0218,2f0234,
+    #2f0290,2f0346,2f20123,M0823,M10862,M1557,M1856,M1906,M2076,M3075,
+    #M3089,M3090,M3252,M3882,M3941,M3989,M4002,M4144,M4186,M4218,
+    #M4258,M4278,M4308,M4438,M4696,M4731,M4850,M4896,M4923,M5112,
+    #M5287,M5418,M5421,M6157,M7702,M9048,M9291]
+
+global.pgen <- pgen(Mydat_CA6211_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_CA6211_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, CA 6.2.11***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for CA.6.2.12, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_CA6212 <- popsub(Mapledata1_genoloc, sublist = c("CA.6.2.12"))
+locNames(Mydat_CA6212)
+Mydat_CA6212_filt <- Mydat_CA6212[,loc=c(-1,-2,-5,-6,-7,-11,-13,-14,-18,-20,-21,-22,
+    -23,-26,-27,-29,-31,-33,-34,-39,-42,-43,-44,-48,-49,-50,-51,-52,-54,-55,-57,-59,
+    -63,-66,-70,-71,-73,-74,-77,-78,-79,-81,-85,-86,-87,-89,-91,-92,-93,-97,-98,-100,
+    -103,-105,-106,-108,-109,-110,-111,-112,-113,-114,-116,-117,-120,-121,-124)]
+
+# drop 67 snps [1f22725,1f0215,1f0481,1f0524,1f0924,1f1228,1f2335,1f5928,2f0049,2f0234,
+  #2f0290,2f0346,2f0617,M0065,M0121,M0659,M0823,M1086,M10862,M1481,M1856,M1906,M2059,
+  #M2155,M2417,M2793,M3075,M3089,M3120,M3136,M3784,M3882,M3999,M4049,M4174,M4186,M4258,
+  #M4278,M4385,M4393,M4438,M4472,M4663,M4665,M4679,M4723,M4731,M4829,M4840,M4906,M4923,M5062,M5227,
+  #MM5287,M5418,M5463,M5646,M5761,M5820,M6002,M6157,M6318,M6560,M6578,M7509,M7588,M8509]
+
+global.pgen <- pgen(Mydat_CA6212_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_CA6212_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, CA 6.2.12***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+*****
+
+#### *Random genotypic probability for CA.7.1.8, accounting for LD*
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+Mydat_CA718 <- popsub(Mapledata1_genoloc, sublist = c("CA.7.1.8"))
+locNames(Mydat_CA718)
+Mydat_CA718_filt <- Mydat_CA718[,loc=c(-17,-21,-15,-31,-33,
+    -42,-43,-52,-56,-57,-66,-73,-74,-90,-99,-100,-102,-112,
+    -113,-114,-115,-119,-121)]
+
+  # remove 23 loci [2f0218,2f0290,2f20123,M0823,M1086,M1856
+  # M1906,M3089,M3252,M3784,M4049,M4258,M4278,M4724,M4998,
+  # M5062,M5112,M6002,M6157,M6318,M6339,M6682,M7588]
+
+global.pgen <- pgen(Mydat_CA718_filt, log = TRUE) %>%  # calculate the global pgen matrix, as log(pgen)
+rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(global.pgen)                              # create a data frame of the results
+
+popul.pgen <- pgen(Mydat_CA718_filt, by_pop = TRUE, log = TRUE) %>%    # calculate pop pgen matrix, log(pgen)
+  rowSums(na.rm = TRUE) #%>%                            # calculate the sums of each row
+as.data.frame(popul.pgen)                               # create a data frame of the results
+
+## produce a summary of the global genotypic probabilities - global and population numbers should be identical
+maple.pgen <- merge(global.pgen,popul.pgen,by="row.names")
+names(maple.pgen)[1:3] <- c("sampleID","pgen_global","pgen_pop")
+maple.pgen  <- merge(x = maple.pgen, y = Mydata, by = "sampleID", all.x=TRUE)[,c("sampleID","pgen_global","pgen_pop","eco3pop")]
+
+maple.pgen_globl.sum <- maple.pgen %>% 
+      summarize(median_log=median(pgen_pop),min_log = min(pgen_pop),max_log = max(pgen_pop),
+      median = exp(median_log),min = exp(min_log),max = exp(max_log))
+#capture.output(maple.pgen_globl.sum, file = "maple_pgen_globl_WA717_summary.csv")  
+```
+
+**Global genotype probabilities for *ACMA, CA 7.1.8***
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+
+maple.pgen_globl.sum %>% tbl_df %>% rmarkdown::paged_table() #print the results using a paged HTML table
+``` 
+<br>
+<br>
+*****
+
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+warnings()
+devtools::session_info()
+# EOF
+```

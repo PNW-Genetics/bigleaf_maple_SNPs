@@ -1,0 +1,544 @@
+---
+title: "Supplementary Data Analysis: Range-wide assessment of SNP variation in bigleaf maple -- control and blank samples"
+author: "Richard Cronn and Kristen N. Finch"
+date: "2020.12.01"
+output:
+    html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+    df_print: paged
+---
+
+### About
+
+This supplemental document includes R code necessary to replicate our basic genetic analyses for *Acer macrophyllum (="ACMA")*, with specific focus on the performance of Agena MassARRAY SNP assay on control samples using varying amounts of DNA, different tissue sources, different run dates, and overal error. 
+
+We adapted the Agena MassARRAY SNP assay for *ACMA*, based on the publication of [Jardine, et al. (2015), 'A Set of 204 SNP and INDEL markers for bigleaf maple'](https://link.springer.com/article/10.1007/s12686-015-0486-7). Their paper described markers for 204 loci; this analysis is based on a subset of 133 genetic markers that have high minor allele frequencies and high heterozygosity in samples from western Washington. These features -- high MAF and high heterozygosity -- make the markers suitable for individualization tests, as they combine to yield extremely low random profile match probabilities (10e^-30^ or less).  
+
+Samples for this analysis were primarily collected by [Adventure Scientist](https://www.adventurescientists.org/) volunteers in the summer of 2018. The total number of samples collected was 1284, and 951 were genotyped. An additional 244 samples were collected by the [PNW Research Station Genetics Team](https://www.fs.usda.gov/pnw/groups/genetics-and-silvicultural-foundations-management), bringing the total number of unique genotyped samples to 1195. These were genotyped in 1344 separate reactions, including replicates.
+
+The information is described in a research manuscript submitted to *Forensic Science International: Animals and Environments* special edition.
+
+Suggested citation for the Article: 
+Cronn RC, Finch KN, Hauck LL, Parker-Forney M, Milligan B, Dowling J, and Adventure Scientists (in review). Range-wide assessment of a SNP panel for individualization and geolocalization of bigleaf maple (*Acer macrophyllum* Pursh). Forensic Sci Int. 
+
+This document and analysis was prepared by Richard Cronn and Kristen N. Finch. Questions can be directed to the contact emails provided in our  ORCID ID's (Cronn, https://orcid.org/0000-0001-5342-3494; Finch, https://orcid.org/0000-0003-2098-7546). 
+
+Users should frequently examine generated data frames with head(). The View() function can be used, but viewing large datasets can cause R to crash. 
+
+### Set Up
+
+This document was prepared with R version 4.0.3 (2020-10-10) and RStudio version 1.3.1073; analyses may not work as described with different versions of R and packages. *Also note that changes to directory names or filenames will require changes to the code below.* As currently written, if the script and the input files are in the same directory, that directly will be set as the working directory and the script should execute.
+
+```{r echo=TRUE,message=FALSE, warning=FALSE}
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+#getwd()                                          #this will show the name of the working directory. 
+```
+
+### Libaries
+
+This script primarily uses the R packages `adegenet`,`poppr` and `AlleleMatch`, with additional funcitons from other packages. Dependencies may need to be installed manually; RStudio will prompt. 
+
+```{r echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+set.seed(20201201)
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+library(editData)
+library(pander)
+library(tibble)
+library(data.table)
+library(RColorBrewer)
+library(adegenet)
+library(poppr)
+library(ggmap)
+library(ggrepel)
+library(lattice)
+library(gridExtra)
+library(mapplots)
+library(rgdal)
+library(agricolae)
+library(stringi)
+library(viridis)
+library(svglite)
+# some packages have conflicts that interfere with functions we use; these are managed here
+library(conflicted)
+conflict_prefer("filter", "dplyr")
+conflict_prefer("melt", "reshape2")
+# set themes and colors
+theme_set(theme_bw())
+require(pals)
+cols12 <- pal.bands(cols25(12))
+```
+
+### Data  
+
+Data is read as *.csv, and has 1344 rows and 149 columns. We also define filename prefixes to help standardize output files at later steps.
+
+```{r echo=TRUE,message=FALSE, warning=FALSE}
+Mydata <- read.csv("MapleSNP_20201201_1344i133s_adegenet.csv", header = TRUE, sep=",")
+basefilename <- "MapleSNP_1344i133s"
+today <- Sys.Date
+dim(Mydata)										 					 #check dimensions
+```
+
+### Pruning
+
+This dataset includes 4 loci that generate spurious signal without added DNA; these are removed prior to analysis.
+
+```{r echo=TRUE,results=FALSE,warning=FALSE}
+Mydata <- subset(Mydata, select = -c(M1752, M3773, M4484, F5144))
+tbl_df(Mydata)
+dim(Mydata)							  					#check dimensions
+```
+
+### Sources  
+
+In this analysis, populations (= *eco3pop*) are defined as US EPA Level III [Ecoregions](https://www.epa.gov/eco-research/ecoregions), with minor modifications. In a separate step, location information (latitude, longitude) was converted into Ecoregions using ARC-GIS; our samples initially represented 14 Ecoregions.
+<br>
+  Ecoregion --- Name <br>
+  6.2.11	---  Klamath Range <br>
+  6.2.12	---  Sierra Nevada Range <br>
+  6.2.5 	---  North Cascades Range <br>
+  6.2.7 	---  Cascades Range <br>
+  6.2.8 	---  Eastern Cascades Slopes <br>
+  7.1.5 	---  Coastal Hemlock-Spruce Forests <br>
+  7.1.6 	---  Pacific and Nass Ranges<br>
+  7.1.7 	---  Strait of Georgia/Puget Lowland <br>
+  7.1.8 	---  Coast Range <br>
+  7.1.9     ---  Willamette Valley <br>
+  10.1.1	---  Thompson-Okanogan Plateau <br>
+  10.2.1	---  Mojave Basin and Range <br>
+  11.1.1	---  California Coastal Oak Woodlands <br>
+  11.1.3	---  Southern California Pine-Oak Mountains <br>
+
+  
+We modified a small number of 'Ecoregion' labels due to:<br>
+
+#### *Small Sample sizes*
+Some Ecoregions are represented by a small number of samples -- these are merged with adjacent ecoregions to get larger (more balanced) population sizes. 
+<br>
+  6.2.8, Eastern Cascade Slopes merged with Cascades, 6.2.7<br>
+  7.1.5, Coastal Hemlock-Spruce Forests merged with Puget Lowland, 7.1.7<br>
+  7.1.9, Willamette Valley merged with Coast Range (7.1.8) if west of longitude -122.950 (approximately the Willamette River), and merged with Cascades (6.2.7) if east of longitude -122.950<br>
+  10.1.1, Okanogan Plateau merged with Pacific and Nass Ranges, 7.1.6<br>
+  10.2.1, Mojave Basin/Range merged with Southern California Pine-Oak Mountains, 10.2.1
+
+#### *Extremely large geographic regions*
+Some Ecoregions span very large distances (e.g., "Coast Range" spans 1000+ km). These large regions were divided by state or province. 
+<br>
+  6.2.7, Cascade Range --- divide into OR and WA sub-regions<br>
+  7.1.7, Strait of Georgia/Puget Lowland --- divide into BC and WA sub-regions<br>
+  7.1.8, Coast Range --- divide into WA, OR and CA sub-regions
+
+#### *Geographically discontiguous regions*
+Finally, some Ecoregions have unusual shapes that are drawn to reflect floristic associations, and these can create geographic outliers. A total of 19 'Ecoregion outlier' samples are moved to adjacent ecoregions to create more contiguous populations. These adjustments are shown in the R code.
+
+```{r,echo=TRUE,results=FALSE,message=FALSE,warning=FALSE}
+## Ecoregion re-classification: re-code Ecoregions with small sample sizes to a proximal ecoregions. Next, re-code large ecoregions to sub-regions. Finally, re-code names so that state/province is identified
+
+Mydata <- Mydata %>%
+  mutate(
+    eco3pop = case_when(
+      eco3pop == "6.2.8" ~ "OR.6.2.7", 	                             # E. Cascade Slopes merged with Cascades	
+      eco3pop == "7.1.5" ~ "7.1.7",	    			                 # Coastal Hemlock-Spruce merged with Puget/Strait of Georgia	
+      eco3pop == "10.1.1" ~ "BC.7.1.6",				                 # Okanagan Plateau merged with Pacific Range/North Cascades	
+      eco3pop == "7.1.9" & gps_longitude < -122.950 ~ "OR.7.1.8",    # West of Willamette River merged with Coast	
+      eco3pop == "7.1.9" & gps_longitude > -122.950 ~ "OR.6.2.7",    # East of Willamette River merged with Cascade
+
+      # CA samples lower than 35.0 degrees latitude defined as CA.11.1.3
+      gps_latitude < 35.0 ~ "CA.11.1.3",	
+
+      # CA samples between 35.0 and 39.0 degrees lat outside of 6.2.11 defined as  CA.11.1.1
+      gps_latitude > 35.0 & gps_latitude < 39.0 & eco3pop != "6.2.12" ~ "CA.11.1.1",
+
+      # U.S. and BC 'North Cascades' and BC 'Pacific and Nass Range' samples redefined as 'North Cascades'
+      eco3pop == "6.2.5" & state == "WA" ~ "BC.7.1.6",
+      eco3pop == "6.2.5" & state == "BC" ~ "BC.7.1.6",
+      eco3pop == "7.1.6" & state == "BC" ~ "BC.7.1.6",
+
+      # Divide Cascade Range 6.2.7 into WA and OR groups		
+      eco3pop == "6.2.7" & state == "OR" ~ "OR.6.2.7",	eco3pop == "6.2.7" & state == "WA" ~ "WA.6.2.7",	
+		
+      # Divide Coast Range 7.1.8 into CA, OR, and WA groups		
+      eco3pop == "7.1.8" & state == "CA" ~ "CA.7.1.8",	eco3pop == "7.1.8" & state == "OR" ~ "OR.7.1.8",	
+      eco3pop == "7.1.8" & state == "WA" ~ "WA.7.1.8", eco3pop == "7.1.8.CA" & state == "CA" ~ "CA.7.1.8",	
+      eco3pop == "7.1.8.OR" & state == "OR" ~ "OR.7.1.8",	eco3pop == "7.1.8.WA" & state == "WA" ~ "WA.7.1.8", 
+
+      # Divide Strait of Georgia/Puget Lowland 7.1.7 by country
+      eco3pop == "7.1.7" & state == "BC" ~ "BC.7.1.7",	eco3pop == "7.1.7" & state == "WA" ~ "WA.7.1.7",
+      eco3pop == "7.1.7.BC" & state == "BC" ~ "BC.7.1.7",	eco3pop == "7.1.7.WA" & state == "WA" ~ "WA.7.1.7",
+
+      # Re-code remaining unmodified codes to include state/province
+      eco3pop == "11.1.1" ~ "CA.11.1.1", eco3pop == "6.2.11" ~ "CA.6.2.11", eco3pop == "6.2.12" ~ "CA.6.2.12",
+
+   TRUE ~ as.character(eco3pop)
+  )
+ )
+
+## Next, re-code geographic outliers to nearest Ecoregion
+Mapledata <- Mydata %>%
+  mutate(
+    eco3pop = case_when(
+
+      # BC Strait of Georgia/Puget Lowland 7.1.7 moved to BC Pacific and Nass Ranges 7.1.6		
+      sampleID == "REPL_13_lf_50_R1_459765" ~ "BC.7.1.6", sampleID == "LZ11_3_lf_50_R1_459765" ~ "BC.7.1.6",
+      sampleID == "LZ11_8_lf_50_R1_459765" ~ "BC.7.1.6", sampleID == "LZ11_6_lf_50_R1_459768" ~ "BC.7.1.6",
+
+      # BC Pacific and Nass Ranges 7.1.6 moved to BC Strait of Georgia/Puget Lowland 7.1.7
+      sampleID == "LZ6_4_lf_50_R1_459765" ~ "BC.7.1.7", sampleID == "LZ6_6_lf_50_R1_459765" ~ "BC.7.1.7", 
+      sampleID == "LZ6_18_lf_50_R1_459765" ~ "BC.7.1.7",sampleID == "LZ6_19_lf_50_R1_459765" ~ "BC.7.1.7", 
+      sampleID == "LZ6_20_lf_50_R1_459765" ~ "BC.7.1.7", 
+
+      # Klamath Mountains 6.2.11 moved to OR Coast Range 7.1.8
+      sampleID == "WZ8_6LEAF_lf_50_R1_459768" ~ "OR.7.1.8", 
+
+      # CA Coast Oak Woodlands 11.1.1 moved to Siskiyou 6.2.11		
+      sampleID == "LZ42_15_lf_50_R1_459765" ~ "CA.6.2.11", sampleID == "LZ43_5_lf_50_R1_459765" ~ "CA.6.2.11",
+
+      # CA Coast Oak Woodlands 11.1.1 moved to Sierra 6.2.12		
+      sampleID == "LZ44_13_lf_50_R1_459765" ~ "CA.6.2.12", sampleID == "LZ46_12_lf_50_R1_459765" ~ "CA.6.2.12", 
+      sampleID == "WZ13_2LEAF_lf_50_R1_459768" ~ "CA.6.2.12", sampleID == "LZ53_2_lf_50_R1_459765" ~ "CA.6.2.12", 
+
+   TRUE ~ as.character(eco3pop)
+  )
+ )
+dim(Mapledata)
+```
+*****
+<br>
+
+### Influence of DNA quantity and quality on call rate  
+Call Rate (abbreviated `CR`) is the proportion of SNPs called for each genotype. CR may be influenced by DNA quantity, quality, tissue, and geography. Here we test whether these factors influence CR.
+
+#### Quantity, quality
+Three plots below show call rate as a function of DNA quantity, tissue source and run date. 
+
+*CR by DNA Mass* shows all samples designated as 'negative controls' (`negcntrl`), 'positive controls' (`poscntrl`), and 'titration' samples (`titration`). A generalized additive model was used to fit a spline regression line for this plot.
+
+*CR by Tissue* and *CR by Analysis Run* include Maple Titration and Positive Control samples that contained > 6 ng [0.24ng/μl] of DNA. Each plot includes a horizontal red line indicating CR = 0.90; this is threshold for including samples for analysis. 
+
+Dimensions of the matrix are shown below, along with the RMSE and r2 from the generalized additive model: 
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+## retain control samples, exclude population samples and samples from other species
+Mapledat2  <- filter(Mapledata, treat2 == "negcntrl" | treat2 == "poscntrl" | treat2 == "titration")
+dim(Mapledat2)
+```
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+## CR as a function of input DNA mass. The response is NOT linear, so use a generalized additive model
+library(tidyverse)
+library(caret)
+library(mgcv)
+set.seed(999)
+training.samples <- Mapledat2$cr %>% createDataPartition(p = 0.8, list = FALSE)
+train.data  <- Mapledat2[training.samples, ]
+test.data <- Mapledat2[-training.samples, ]
+
+model <- gam(cr ~ s(mass), data = train.data)        				 # Build a GAM to automatically fit a spline regression
+predictions <- model %>% predict(test.data)          				 # Make predictions
+data.frame(                                          				 # Model performance
+  RMSE = RMSE(predictions, test.data$cr),
+  R2 = R2(predictions, test.data$cr)
+  )
+```
+
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+## CR as a function of input DNA mass. 
+Box1 <- ggplot(train.data, aes(mass, cr) ) +    # Plot results
+  geom_point() +   stat_smooth(method = gam, formula = y ~ s(x), se=FALSE) +
+  ggtitle("Call Rate by DNA Mass") + labs(x = "", y="Call Rate (proportion success)") +
+  theme(plot.title = element_text(size=12, face="bold"))
+Box1 <- Box1 + geom_jitter(position=position_jitter(width=1.5, height=0), alpha=0.2)
+Box1 <- Box1 + geom_hline(yintercept=0.90, linetype="dashed", color = "red") # + ylim(0.0, 1.0)
+
+## CR as a function of 'tissue' (wood vs leaves). For this analysis, we drop samples 
+## with less than 6 ng of DNA.
+Mapledat2b <- filter(Mapledat2, Mapledat2$mass > 5)
+Box2 <- ggplot(Mapledat2b, aes(x=tissue, y=cr)) + geom_boxplot(outlier.shape=NA) + 
+  ggtitle("Call Rate by Tissue") + theme(plot.title = element_text(size=12, face="bold")) +     
+  labs(x = "", y="Call Rate")
+Box2 <- Box2 + geom_jitter(position=position_jitter(width=.2, height=0), alpha=0.2)
+Box2 <- Box2 + geom_hline(yintercept=0.95, linetype="dashed", color = "red") + ylim(0.0, 1.0)
+
+## CR as a function of analysis date. 
+Box3 <- ggplot(Mapledat2b, aes(x=(factor(neogenRun)), y=cr)) + 
+  geom_boxplot(outlier.shape=NA) + ggtitle("Call Rate by Analysis Run") + 
+  theme(plot.title = element_text(size=12, face="bold")) +  
+  theme(axis.text.x = element_text(angle=45, vjust=0.5)) + labs(x = "", y="Call Rate")
+Box3 <- Box3 + geom_jitter(position=position_jitter(width=.2, height=0), alpha=0.2)
+Box3 <- Box3 + geom_hline(yintercept=0.95, linetype="dashed", color = "red") +
+  ylim(0.0, 1.0)
+
+```
+
+```{r echo=FALSE, results=TRUE,message=FALSE,warning=FALSE, fig.align="center", fig.cap="Figure: Summary of Call Rate (CR) versus Input DNA mass (top), Tissue (bottom left) and Analysis Run (bottom right)"}
+## Plot CR results. Uncomment "svglite" and "dev.off" lines to print to a svg
+#library(svglite)
+#svglite("plot3.svg", width = 8, height = 6)
+ggarrange(Box1,                                                 	 # First row with DNA mass
+        ggarrange(Box2, Box3, ncol = 2, labels = c("", "")),    	 # Second row with Source, Run date
+        nrow = 2, 
+        labels = ""                                          
+        )
+#dev.off()
+```
+
+### Call Rate ANOVA  
+We want to know whether CR is associated with variation in DNA Mass, Tissue Source or Analysis Run in order to identify source of variation that influence genotyping success. We tested this model: `Mapledata.aov <- aov(Mapledat2b$cr~Mapledat2b$tissue*Mapledat2b$mass*Mapledat2b$neogenRun)` 
+
+We also want to know if CR is different between 'no DNA' and 'extraction blank' control samples. If there is no difference between  treatments, we can conclude that contamination is unlikely to be the source of spurious genotypes; instead, assay components are a more likely source. We subset the data to focus on negative controls, and then test for differences using ANOVA using this model: `Mapledata.aov <- aov(Mapledat2c$cr~Mapledat2c$sample)`
+
+Conclusions: 
+
+Results suggest that there is a weakly significant association between call rate and tissue (mean for mean = 0.994; leaves = 0.979). DNA mass and genotyping raun show no association with CR.
+
+Finally, there is no difference in the call rate of water blanks and extraction blanks. This suggests that the spurious signal likely arises from assay components. 
+
+```{r echo=FALSE,results=FALSE,message=FALSE,warning=FALSE}
+setDT(Mapledat2b)[ , list(mean_cr = mean(cr), sd_cr = sd(cr), count = .N) , by = .(tissue)]
+setDT(Mapledat2b)[ , list(mean_cr = mean(cr), sd_cr = sd(cr), count = .N) , by = .(mass)]
+setDT(Mapledat2b)[ , list(mean_cr = mean(cr), sd_cr = sd(cr), count = .N) , by = .(neogenRun)]
+setDT(Mapledat2b)[ , list(count = .N) , by = .(sampleID)]
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+Mapledata.aov <- aov(Mapledat2b$cr~Mapledat2b$tissue*Mapledat2b$mass*Mapledat2b$neogenRun)
+pander(summary(Mapledata.aov))
+#plot(Mapledata.aov)						          				 #uncomment to examine residual and Q-Q plots
+#(HSD.test(Mapledata.aov, "Mapledat2b$tissue"))       				 #uncomment to perform Tukey's HSD test
+#(HSD.test(Mapledata.aov, "Mapledat2b$mass"))  	      				 #uncomment to perform Tukey's HSD test
+#(HSD.test(Mapledata.aov, "Mapledat2b$neogenRun"))    				 #uncomment to perform Tukey's HSD test
+```
+
+
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+## retain negative control samples, exclude positive control and titration samples--
+Mapledat2c <- filter(Mapledat2, treat2 == "negcntrl")
+dim(Mapledat2c)
+```
+```{r echo=FALSE,results=FALSE,message=FALSE,warning=FALSE}
+setDT(Mapledat2c)[ , list(mean_cr = mean(cr), sd_cr = sd(cr), count = .N) , by = .(sample)]
+setDT(Mapledat2c)[ , list(count = .N) , by = .(sampleID)]
+```
+```{r echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+Mapledata.aov <- aov(Mapledat2c$cr~Mapledat2c$sample)
+pander(summary(Mapledata.aov))
+#plot(Mapledata.aov)						          				 #uncomment to examine residual and Q-Q plots
+#(HSD.test(Mapledata.aov, "Mapledat2c$sample"))    				 	 #uncomment to perform Tukey's HSD test 
+```
+
+
+*****
+
+### Save control genotypes to a different format using 'adegenet'
+
+Positive 'control' samples (1W, 2E, MAL) are read into `adegenet` to efficiently remove genotypes that do not meet call rate thresholds, and to reformat genetic data frames for other programs. Here, we read data into `adegenet`, apply the call rate filter (CR>0.9) to the data, then reformat it so that it can be read by `alleleMatch`.   
+
+```{r echo=TRUE, results=TRUE, message=TRUE,warning=FALSE}
+## Read SNPs, define individuals and 'populations' (in this case, population is "tree" [1W, 2E, MAL])
+locus <- Mapledat2[, -c(1:16)]                            			 # save matrix of snps
+colnames(locus) <- gsub("\\.", "_", colnames(locus))      			 # locus names can't have "."
+ind <- as.character(Mapledat2$sampleID)                   			 # labels of the individuals
+population <- as.character(Mapledat2$sample)              			 # labels populations(= 'sample')
+
+#convert to genind, adegenet format; define strata ('population' in this example)
+Mapledat3 <- df2genind(locus, ploidy = 2, ind.names = ind, pop = population, sep = "")
+strata_df <- data.frame(pop(Mapledat3))                   			 # Create a data frame from the list 
+strata(Mapledat3) <- strata_df                            
+```
+
+```{r echo=TRUE, results=TRUE, message=TRUE,warning=FALSE}
+# Set the genotype 'MISSINGNO' cut-off to 0.10. This removes genotypes showing > 10% missing information
+Mapledat3_geno <- missingno(Mapledat3, type = "geno", cutoff = 0.10, quiet = FALSE, freq = FALSE)
+
+# Set SNP 'MISSINGNO'cutoff to 0.10. This removes SNPS showing > 10% missing information 
+Mapledat3_genoloc <- missingno(Mapledat3_geno, type = "loci", cutoff = 0.10, quiet = FALSE, freq = FALSE)
+summary(Mapledat3_genoloc)
+```
+
+Save positive control SNP genotypes as *.csv file (1 and 2 column SNP formats)
+```{r echo=TRUE, results=FALSE, message=FALSE,warning=FALSE}
+outfile1 <- paste(basefilename,'_controls_1col.csv')
+Maple2col <- genind2df(Mapledat3_genoloc, pop = NULL, sep = "", usepop = TRUE, oneColPerAll = FALSE)
+write.csv(Maple2col,outfile1)
+
+outfile2 <- paste(basefilename,'_controls_2col.csv')
+Maple1col <- genind2df(Mapledat3_genoloc, pop = NULL, sep = "", usepop = TRUE, oneColPerAll = TRUE)
+write.csv(Maple1col,outfile2)
+```
+*****
+
+### Geographic analysis
+
+We evaluate whether geography impacts Call Rate in this section. We first filter data for 'population' samples with locality information.
+
+```{r echo=TRUE, results=FALSE, warning=FALSE}
+# retain only individuals who are part of the population screen
+Mapledat4  <- filter(Mapledata, Mapledata$treat2 == "populatn")
+dim(Mapledat4)
+# filter individuals missing location information
+Mapledat5 <- filter(Mapledat4, Mapledat4$state != "UNK")
+Mapledat5 <- Mapledat5 %>% filter(!is.na(state))
+Mapledat5 <- Mapledat5 %>% filter(!is.na(eco3pop))
+Mapledat5 <- Mapledat5 %>% filter(!is.na(lat_pop))
+tbl_df(Mapledat5)
+dim(Mapledat5)
+```
+
+### Sample counts by Ecoregion
+
+These histograms show the number of samples representing different strata; latitudinal groups (`lat_pop`), Level 3 Ecoregions (`eco3pop`), and states or provinces (`state`).
+
+```{r,echo=FALSE,results=TRUE,message=FALSE,warning=FALSE, fig.align="center", fig.cap="Figure: Sample counts for geographic groups, including 'lat_pop' (latitude group, rounded to degree),'state' (or province), and 'eco3pop' (Ecoregion Level III)"}
+
+#latitude
+latcount <- ggplot(data = Mapledat5, aes(x=lat_pop, fill=lat_pop)) + geom_histogram(binwidth=1) +
+  stat_bin(aes(label= ..count..),binwidth=1,geom ="text", vjust=-0.5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + scale_fill_grey() + 
+  theme(legend.position="none")
+
+#ecoregion
+eco3count <- ggplot(data = Mapledat5, aes(x=eco3pop, fill=eco3pop)) + geom_bar() +
+  stat_count(aes(label= ..count..), geom ="text", vjust=-0.5) + 
+  scale_fill_manual(values=as.vector(cols25(12))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position="none")
+
+#state
+statecount <- ggplot(data = Mapledat5, aes(x=state, fill=state)) + geom_bar() +
+  stat_count(aes(label= ..count..), geom ="text", vjust=-0.5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_fill_grey() + theme(legend.position="none")
+
+#svglite("plot2.svg", width = 8, height = 6)
+ggarrange(latcount, statecount, eco3count, ncol = 3)
+#dev.off()
+```
+
+### Call Rate by Geography
+
+These plots show the relationship between CR and geographic strata: 'Level 3 Ecoregion' (defined by ArcGIS), 'state' and 'latitude origin'. Each plot shows a horizontal red line indicating the CR = 0.90 threshold.  
+
+```{r echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+Box4 <- ggplot(Mapledat5, aes(x=eco3pop, y=cr, fill=eco3pop)) + 
+  geom_boxplot(outlier.shape=NA) + ggtitle("Call Rate by Level 3 Ecoregion") + 
+  scale_fill_manual(values=as.vector(cols25(12))) +
+  theme(plot.title = element_text(size=14, face="bold")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1.1, size=8)) +
+  labs(x = "", y="Call Rate") 
+Box4 <- Box4 + geom_jitter(position=position_jitter(width=.2, height=0), alpha=0.25) + 
+  scale_fill_manual(values=as.vector(cols25(12))) + 
+  geom_hline(yintercept=0.90, linetype="dashed", color = "red") + ylim(0.0, 1.0) +
+  theme(legend.position="none")
+
+Box5 <- ggplot(Mapledat5, aes(x=lat_pop, y=cr)) + 
+  geom_boxplot(outlier.shape=NA) + ggtitle("Call Rate by Latitude") + 
+  theme(plot.title = element_text(size=14, face="bold")) + 
+  labs(x = "", y="Call Rate") 
+Box5 <- Box5 + geom_jitter(position=position_jitter(width=0.1, height=0), alpha=0.2)
+Box5 <- Box5 + geom_hline(yintercept=0.90, linetype="dashed", color = "red") + ylim(0.0, 1.0)
+
+Box6 <- ggplot(Mapledat5, aes(x=(factor(state)), y=cr)) + geom_boxplot(outlier.shape=NA) + 
+  ggtitle("Call Rate by State") + theme(plot.title = element_text(size=14, face="bold")) + 
+  labs(x = "", y="Call Rate") 
+Box6 <- Box6 + geom_jitter(position=position_jitter(width=.2, height=0), alpha=0.25)
+Box6 <- Box6 + geom_hline(yintercept=0.90, linetype="dashed", color = "red") + ylim(0.0, 1.0)
+```
+
+```{r echo=FALSE, results=TRUE,message=FALSE,warning=FALSE,fig.align="center",fig.cap="Figure: Summary of Call Rate versus Level III Ecoregion (top), State/Province (bottom left), and Latitude group (bottom right)"}
+#svglite("plot4.svg", width = 8, height = 6)
+ggarrange(Box4,                                             		 # First row with Ecoregion plot
+        ggarrange(Box6, Box5, ncol = 2, labels = c("", "")),		 # Second row with State, Latitude
+        nrow = 2, 
+        labels = "" 
+        )
+#dev.off()
+```
+<br>
+#### Call Rate ANOVA: associations between CR and geographic groups 
+
+We want to know if CR is associated with variation in Eco3pop and lat_pop. This could point to variation due to geographic origin. We tested this model: `Mapledata.aov <- aov(Mapledat5$cr~Mapledat5$eco3pop*Mapledat5$lat_pop)`
+
+Conclusion: 
+Results show that Call Rate shows a weak but significant association with `eco3pop`. There isn't a relationship between latitude (`latpop`) and Call Rate, so the association with `eco3pop`may reflect population variation in DNA quality. 
+
+```{r echo=FALSE,results=FALSE,message=FALSE,warning=FALSE}
+setDT(Mapledat5)[ , list(mean_cr = mean(cr), sd_cr = sd(cr), count = .N) , by = .(eco3pop)]
+setDT(Mapledat5)[ , list(mean_cr = mean(cr), sd_cr = sd(cr), count = .N) , by = .(lat_pop)]
+setDT(Mapledat5)[ , list(count = .N) , by = .(sampleID)]
+```
+```{r echo=FALSE,results=TRUE,message=FALSE,warning=FALSE}
+Mapledata_geo.aov <- aov(Mapledat5$cr~Mapledat5$eco3pop*Mapledat5$lat_pop)
+pander(summary(Mapledata_geo.aov))
+#plot(Mapledata_geo.aov)											                 #uncomment for residual and Q-Q plots 
+#(HSD.test(Mapledata_geo.aov, "Mapledat5$eco3pop"))    				 #uncomment to perform Tukey's HSD test
+#(HSD.test(Mapledata_geo.aov, "Mapledat5$lat_pop"))    				 #uncomment to perform Tukey's HSD test
+```
+
+### Evaluating positive controls for genotyping errors 
+
+SNP genotyping has a measurable error rate. We genotyped three control trees (1W, 2E, MAL) multiple times, so numbers and types of errors can be directly counted. To facilitate this analysis, we use the package `alleleMatch` [(Galpern et al., 2012)](https://cran.r-project.org/web/packages/allelematch/allelematch.pdf) to cluster multilocus genotypes in data sets where the true number of individuals is known (*n = 3*), and where genotyping error and missing data are present.
+
+This analysis evaluates SNP assay results to determine: <br>
++ The number of unique genotypes identified at different mismatch values <br>
++ The number of 'multiple match' genotypes identified at mismatch values <br>
++ The number of 'unclassified' genotypes identified at mismatch values <br>
++ The sample size and 'missingDataLoad' (proportion of SNP calls missing) <br>
+
+AlleleMatch provides a summary table (HTML, csv) listing: <br>
++ Unique genotypes and samples that share the genotype <br>
++ The Probability of Identity (Sibs) for each genotype <br>
+
+The summary table is used to identify missing genotypes ('NA'), heterozygote drop-outs (e.g., known "CT" is scored as "CC" due to loss of "T" signal), or drop-ins (e.g., a known "CC" is scored as "CT" due to gain of "T" signal).
+
+#### *LOAD MAPLE DATA* <br>
+NOTE: For this analysis, we ignore column 2 
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+library(allelematch)
+AMdata <- read.csv(outfile2, header = TRUE, sep=",")
+AMdata2 <- amDataset(AMdata, indexColumn=1, ignoreColumn=2, missingCode="NA")
+``` 
+  
+#### *IDENTIFY OPTIMAL MISMATCH PARAMETER VALUE*
+This analysis determines optimal thresholds for identity (matchThreshold, cutHeight, alleleMismatch). 
+
+Conclusion: 
+We know that the true number of genotypes is 3 in this analysis. An alleleMismatch setting of '7' returns the correct number of genotypes. We use this setting in the next 'amUnique' clustering step. 
+
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+#png((filename = "MapleSNP_amUniqueProfile.png"), width = 660, height = 480, units = "px")
+amUniqueProfile(AMdata2, alleleMismatch=c(0:10), doPlot=TRUE)
+#dev.off()
+```
+
+#### *IDENTIFY MATCHES BASED ON ALLELE MISMATCH PARAMETER*
+Using the optimal alleleMismatch = 7 setting, we can cluster sequences and screen the output for errors. The script below can examine a range of mismatch values; however it is currently set to the optimal value (k = 7). Results are clustered sequences in html (*basefile*_AMunique.html) or csv (*basefile*_AMunique.csv) format.
+```{r,echo=FALSE,results=FALSE,message=FALSE,warning=FALSE}
+
+outfile2 <- paste(basefilename,'_AMunique.html')
+outfile3 <- paste(basefilename,'_AMunique.csv')
+                  
+k <- 7
+  while (k < 10) {
+    mapleExample <- amUnique(AMdata2, alleleMismatch=k, consensusMethod = 3)
+    summary(mapleExample, html=outfile2)                        # save output to HTML
+    summary(mapleExample, csv=outfile3, uniqueOnly = FALSE)     # save output to csv 
+    ## can obtain unique sequences only by setting uniqueOnly=TRUE
+    k = k+10
+    } 
+
+## AlleleMatch occasionally reports loci with fixed "T" alleles as "TRUE"; substituting "TRUE" with "T" corrects this
+library(xfun)
+gsub_file(outfile2, "TRUE", "T")
+gsub_file(outfile3, "TRUE", "T")
+```
+*****
+
+```{r,echo=TRUE,results=TRUE,message=FALSE,warning=FALSE}
+warnings()
+devtools::session_info()
+# EOF
+```
